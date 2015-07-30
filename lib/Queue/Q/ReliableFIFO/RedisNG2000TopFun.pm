@@ -4,31 +4,59 @@ use strict;
 use warnings;
 
 use Carp qw/croak/;
-use Digest::SHA qw//;
+use Data::UUID::MT;
 use Redis qw//;
 use Time::HiRes qw//;
 
 use Queue::Q::ReliableFIFO::ItemNG2000TopFun;
 
+use constant {
+    CLAIM_NONBLOCKING => 0,
+    CLAIM_BLOCKING => 1,
+};
+
+our ( %VALID_SUBQUEUES, %VALID_PARAMS );
+
+BEGIN {
+    # define subqueue names and map to accessors
+    %VALID_SUBQUEUES = map { $_ => "_${_}_queue" } qw/
+        unprocessed
+        working
+        processed
+        failed
+        temp
+    /;
+
+    # valid constructor params
+    %VALID_PARAMS = map { $_ => 1 } qw/
+        server
+        port
+        db
+        queue_name
+        busy_expiry_time
+        claim_wait_timeout
+        requeue_limit
+        redis_handle
+        redis_options
+        warn_on_requeue
+    /;
+}
+
 use Class::XSAccessor {
-    getters => [ qw/
-      server
-      port
-      db_id
-      queue_name
-      busy_expiry_time
-      claim_wait_timeout
-      requeue_limit
-      redis_handle
-      redis_options
-      warn_on_requeue
-      _pending_queue
-      _busy_queue
-      _retry_queue
-      _failed_queue
-      _temp_queue
-      _script_cache
-      _lua
+    getters => [
+        values %VALID_SUBQUEUES, qw/
+            server
+            port
+            db_id
+            queue_name
+            busy_expiry_time
+            claim_wait_timeout
+            requeue_limit
+            redis_handle
+            redis_options
+            warn_on_requeue
+            _script_cache
+            _lua
     /],
     setters => {
         set_requeue_limit      => 'requeue_limit',
@@ -36,31 +64,7 @@ use Class::XSAccessor {
         set_claim_wait_timeout => 'claim_wait_timeout',
     }
 };
-
-use constant { 
-    USE_BLOCKING_CLAIM => 1,
-};
-
-my %VALID_SUBQUEUES = map { $_ => 0 } qw/
-    pending
-    busy
-    retry
-    failed
-    temp
-/;
-
-my %VALID_PARAMS = map { $_ => 1 } qw/
-    server
-    port
-    db
-    queue_name
-    busy_expiry_time
-    claim_wait_timeout
-    requeue_limit
-    redis_handle
-    redis_options
-    warn_on_requeue
-/;
+my $UUID = Data::UUID::MT->new( version => '4s' );
 
 sub new {
     my ($class, %params) = @_;
@@ -70,7 +74,7 @@ sub new {
     }
 
     foreach my $provided_param (keys %params) {
-        exists $VALID_PARAMS{$provided_param} or croak __PACKAGE__ ."->new: encountered unknown parameter $provided_param";
+        $VALID_PARAMS{$provided_param} or croak __PACKAGE__ ."->new: encountered unknown parameter $provided_param";
     }
 
     my $self = bless({
@@ -88,8 +92,10 @@ sub new {
         server    => join( ':' => $params{server}, $params{port} ),
     );
 
+    # populate subqueue attributes with name of redis list
+    # e.g. unprocessed -> _unprocessed_queue (accessor name) -> foo_unprocessed (redis list name)
     foreach my $subqueue_name ( keys %VALID_SUBQUEUES ) {
-        my $accessor_name = sprintf '_%s_%s', $subqueue_name, 'queue';
+        my $accessor_name = $VALID_SUBQUEUES{$subqueue_name};
         my $redis_list_name = sprintf '%s_%s', $params{queue_name}, $subqueue_name;
         $self->{$accessor_name} = $redis_list_name;
     }
@@ -116,17 +122,18 @@ sub enqueue_item {
 
     my $redis_handle = $self->redis_handle;
 
-    my $pushed = 0;
+    my @created;
 
-    foreach my $item (@_) {
-        my $now = Time::HiRes::time;
-        my $sha512 = Digest::SHA::sha512_hex($item);
-        my $item_key = sprintf '%s-%s-%s', $self->queue_name, $sha512, $now;
+    foreach my $input_item (@_) {
+        my $item_id  = $UUID->create_hex();
+        my $item_key = sprintf '%s-%s', $self->queue_name, $item_id;
 
         # create payload item
-        my $setnx_success = $redis_handle->setnx("item-$item_key" => $item);
+        my $setnx_success = $redis_handle->setnx("item-$item_key" => $input_item);
 
-        my %meta_payload = (
+        my $now = Time::HiRes::time;
+
+        my %metadata = (
             process_count => 0, # amount of times a single consumer attempted to handle the item
             bail_count    => 0, # amount of times process_count exceeded its threshold
             time_created  => $now,
@@ -134,69 +141,69 @@ sub enqueue_item {
         );
 
         # create metadata
-        my $hmset_success = $redis_handle->hmset( "meta-$item_key" => %meta_payload );
-
-        require Data::Dumper;
-        warn Data::Dumper::Dumper({
-            pending_queue => $self->_pending_queue,
-            item_key => $item_key,
-        });
+        my $hmset_success = $redis_handle->hmset( "meta-$item_key" => %metadata );
 
         # enqueue item
-        unless ( $redis_handle->lpush( $self->_pending_queue, $item_key ) ) {
-            die sprintf '%s->enqueue_item failed to lpush key %s onto pending queue %s', __PACKAGE__, $item_key, $self->_pending_queue;
+        unless ( $redis_handle->lpush( $self->_unprocessed_queue, $item_key ) ) {
+            die sprintf '%s->enqueue_item failed to lpush item_key=%s onto unprocessed queue %s', __PACKAGE__, $item_key, $self->_unprocessed_queue;
         }
 
-        $pushed++;
+        push @created, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+            item_key => $item_key,
+            payload  => $input_item,
+            metadata => \%metadata,
+        });
     }
+
+    return \@created;
 }
 
 sub claim_item {
     my ($self, $n_items) = @_;
-    $self->_claim_item_internal($n_items);
+    $self->_claim_item_internal($n_items, CLAIM_BLOCKING);
 }
 
 
 sub claim_item_nonblocking {
     my ($self, $n_items) = @_;
-    $self->_claim_item_internal($n_items, USE_BLOCKING_CLAIM);
+    $self->_claim_item_internal($n_items, CLAIM_NONBLOCKING);
 }
 
 sub _claim_item_internal {
     my ($self, $n_items, $do_blocking) = @_;
 
-    my $timeout       = $self->claim_wait_timeout;
-    my $redis_handle  = $self->redis_handle;
-    my $pending_queue = $self->_pending_queue;
-    my $busy_queue    = $self->_busy_queue;
+    my $timeout           = $self->claim_wait_timeout;
+    my $redis_handle      = $self->redis_handle;
+    my $unprocessed_queue = $self->_unprocessed_queue;
+    my $working_queue        = $self->_working_queue;
 
     unless ( defined $n_items and $n_items > 0 ) {
         $n_items = 1;
     }
 
     if ( $n_items == 1 and !$do_blocking ) {
-        return unless my $key = $redis_handle->rpoplpush($self->_pending_queue, $self->_busy_queue);
+        return unless my $item_key = $redis_handle->rpoplpush($self->_unprocessed_queue, $self->_working_queue);
 
-        my %metadata = $redis_handle->hgetall("meta-$key");
-        my $payload  = $redis_handle->get("item-$key");
+        my %metadata = $redis_handle->hgetall("meta-$item_key");
+        my $payload  = $redis_handle->get("item-$item_key");
 
         return Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
-            key      => $key,
+            item_key      => $item_key,
             payload  => $payload,
             metadata => \%metadata,
         });
     }
     elsif ( $n_items == 1 and $do_blocking ) {
-        my $key = $redis_handle->rpoplpush($self->_pending_queue, $self->_busy_queue) 
-               || $redis_handle->brpoplpush($self->_pending_queue, $self->_busy_queue);
+        my $item_key = $redis_handle->rpoplpush($self->_unprocessed_queue, $self->_working_queue)
+               || $redis_handle->brpoplpush($self->_unprocessed_queue, $self->_working_queue);
 
-        return unless $key;
+        return unless $item_key;
 
-        my %metadata = $redis_handle->hgetall("meta-$key");
-        my $payload  = $redis_handle->get("item-$key");
+        my %metadata = $redis_handle->hgetall("meta-$item_key");
+        my $payload  = $redis_handle->get("item-$item_key");
 
         return Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
-            key      => $key,
+            item_key => $item_key,
             payload  => $payload,
             metadata => \%metadata,
         });
@@ -212,20 +219,20 @@ sub _claim_item_internal {
         my @items;
 
         my $handler = sub {
-            return unless defined(my $key = $_[0]);
+            return unless defined(my $item_key = $_[0]);
 
-            my %metadata = $redis_handle->hgetall("meta-$key");
-            my $payload  = $redis_handle->get("item-$key");
+            my %metadata = $redis_handle->hgetall("meta-$item_key");
+            my $payload  = $redis_handle->get("item-$item_key");
 
             unless ( keys %metadata ) {
-                warn sprintf '%s->_claim_item_internal: fetched empty metadata for key %s', __PACKAGE__, $key;
+                warn sprintf '%s->_claim_item_internal: fetched empty metadata for item_key=%s', __PACKAGE__, $item_key;
             }
             unless ( defined $payload ) {
-                warn sprintf '%s->_claim_item_internal: fetched empty payload for key %s', __PACKAGE__, $key;
+                warn sprintf '%s->_claim_item_internal: fetched empty payload for item_key=%s', __PACKAGE__, $item_key;
             }
 
             push @items, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
-                key      => $key,
+                item_key => $item_key,
                 payload  => $payload,
                 metadata => \%metadata,
             });
@@ -235,18 +242,18 @@ sub _claim_item_internal {
 
         if ($n_items > 30) {
             # yes, there is a race, but it's an optimization only
-            my ($llen) = $redis_handle->llen($pending_queue);
+            my ($llen) = $redis_handle->llen($unprocessed_queue);
             $n_items = $llen if $llen < $n_items;
         }
         eval {
-            $redis_handle->rpoplpush($pending_queue, $busy_queue, $handler) for 1 .. $n_items;
+            $redis_handle->rpoplpush($unprocessed_queue, $working_queue, $handler) for 1 .. $n_items;
             $redis_handle->wait_all_responses;
             if ( @items == 0 && $do_blocking ) {
-                $first_item = $redis_handle->brpoplpush($pending_queue, $busy_queue, $timeout);
+                $first_item = $redis_handle->brpoplpush($unprocessed_queue, $working_queue, $timeout);
 
                 if (defined $first_item) {
                     $handler->($first_item);
-                    $redis_handle->rpoplpush($pending_queue, $busy_queue, $handler) for 1 .. ($n_items-1);
+                    $redis_handle->rpoplpush($unprocessed_queue, $working_queue, $handler) for 1 .. ($n_items-1);
                     $redis_handle->wait_all_responses;
                 }
             }
@@ -262,24 +269,54 @@ sub _claim_item_internal {
     die sprintf '%s->_claim_item_internal: how did we end up here?', __PACKAGE__;
 }
 
-sub finish_item {
-    my ($self, $items) = @_;
+sub mark_item_as_processed {
+    my $self = shift;
+
+    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY')
+        ? $_[0]
+        : \@_; # or should we copy it instead?
 
     my $redis_handle = $self->redis_handle;
 
-    my $items_marked = 0;
+    my %result = (
+        flushed => [],
+        failed  => [],
+    );
+
+    # callback receives result of LREM call for removing item from the working
+    # queue and populates %result. if the LREM succeeds, we also need to clean
+    # up the payload+metadata.
 
     foreach my $item (@$items) {
-        $redis_handle->lrem( $self->_busy_queue, -1, $item->{key}, sub { $items_marked += $_[0] } );
+        my $item_key = $item->{item_key};
+        my $lrem_direction = 1; # head-to-tail (http://redis.io/commands/lrem)
+
+        $redis_handle->lrem(
+            $self->_working_queue,
+            $lrem_direction,
+            $item_key,
+            sub {
+                my $success = $_[0];
+                if ( $success ) {
+                    my @item_keys = ("meta-$item_key", "item-$item_key");
+                    my $keys_removed = $redis_handle->del(@item_keys);
+                    $keys_removed == 2 or warn sprintf '%s->mark_item_as_processed: could not DEL meta_key=%s or payload_key=%s', __PACKAGE__, @item_keys[0,1];
+                }
+                my $result_key = $success ? 'flushed' : 'failed';
+                push @{ $result{$result_key} } => $item_key;
+            }
+        );
     }
 
     $redis_handle->wait_all_responses;
 
-    if ( $items_marked != @$items ) {
-        warn sprintf '%s->mark_item_as_done: $items_marked != @$items (did some items get stuck?)', __PACKAGE__;
+    my ($flushed, $failed) = @result{qw/flushed failed/};
+
+    if (@$failed) {
+        warn sprintf '%s->mark_item_as_done: %d/%d items were not removed from working_queue=%s', __PACKAGE__, int(@$failed), int(@$flushed+@$failed), $self->_working_queue;
     }
 
-    return $items_marked;
+    return \%result;
 }
 
 1;

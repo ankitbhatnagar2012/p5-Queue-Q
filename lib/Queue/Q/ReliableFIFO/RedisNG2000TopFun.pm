@@ -384,6 +384,18 @@ sub __requeue_busy  {
     return $items_requeued;
 }
 
+sub queue_length {
+    my ($self, $subqueue_name) = @_;
+
+    my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
+    or die sprintf(q{couldn't find subqueue_accessor for subqueue_name=%s}, $subqueue_name);
+
+    my $subqueue_redis_key = $self->$subqueue_accessor_name;
+
+    my ($llen) = $self->redis_handle->llen($subqueue_redis_key);
+    return $llen;
+}
+
 # this function returns the oldest item in the queue
 sub peek_item {
     my ($self, $subqueue_name) = @_;
@@ -409,6 +421,23 @@ sub peek_item {
     });
 
     return $item;
+}
+
+sub age {
+    my ($self, $subqueue_name) = @_;
+
+    my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
+    or die sprintf(q{couldn't find subqueue_accessor for subqueue_name=%s}, $subqueue_name);
+
+    my $subqueue_redis_key = $self->$subqueue_accessor_name;
+    my $redis_handle = $self->redis_handle;
+
+    # take oldest item
+    my ($item_key) = $redis_handle->lrange($subqueue_redis_key,-1,-1);
+    $item_key or return undef;
+
+    my $time_created = $redis_handle->hget("meta-$item_key" => 'time_created') || Time::HiRes::time();
+    return Time::HiRes::time() - $time_created;
 }
 
 sub percent_memory_used {

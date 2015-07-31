@@ -380,4 +380,49 @@ sub __requeue_busy  {
     return $n;
 }
 
+# this function returns the oldest item in the queue
+sub peek_item {
+    my ($self, $subqueue_name) = @_;
+
+    my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
+    or die sprintf(q{couldn't find subqueue_accessor for subqueue_name=%s}, $subqueue_name);
+
+    my $subqueue_redis_key;
+    unless ( $subqueue_redis_key = $self->$subqueue_accessor_name ) {
+        die sprintf "couldn't map subqueue_name=%s to a redis key", $subqueue_name;
+    }
+
+    my $redis_handle = $self->redis_handle;
+
+    # take oldest item (and bail if we can't find anything)
+    my ($item_key) = $redis_handle->lrange($subqueue_redis_key,-1,-1);
+    $item_key or return undef;
+
+    my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+        item_key => $item_key,
+        payload  => $redis_handle->get("item-$item_key") || undef,
+        metadata => { $redis_handle->hgetall("meta-$item_key") },
+    });
+
+    return $item;
+}
+
+sub percent_memory_used {
+    my ($self) = @_;
+
+    my $r = $self->redis_handle;
+
+    my (undef, $mem_avail) = $conn->config('get', 'maxmemory');
+
+    if ($mem_avail == 0) {
+        warn sprintf "%s->percent_memory_used: maxmemory is set to 0, can't derive a percentage";
+        return undef;
+    }
+
+    my $info = $r->info('memory');
+    my $mem_used = $info->{used_memory};
+
+    return $mem_used == 0 ? 0 : ( $mem_used / $mem_avail ) * 100;
+}
+
 1;

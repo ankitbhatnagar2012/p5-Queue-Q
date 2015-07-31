@@ -3,6 +3,7 @@ package Queue::Q::ReliableFIFO::RedisNG2000TopFun;
 use strict;
 use warnings;
 
+use Data::Dumper;
 use Carp qw/croak/;
 use Data::UUID::MT;
 use Redis qw//;
@@ -114,9 +115,11 @@ sub new {
 sub enqueue_item {
     my $self = shift;
 
-    return unless @_;
+    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY')
+        ? $_[0]
+        : \@_; # or should we copy it instead?
 
-    if ( grep { ref $_ } @_ ) {
+    if ( grep { ref $_ } @$items ) {
         die sprintf '%s->enqueue_item: encountered a reference; all payloads must be serialised in string format', __PACKAGE__;
     }
 
@@ -124,7 +127,7 @@ sub enqueue_item {
 
     my @created;
 
-    foreach my $input_item (@_) {
+    foreach my $input_item (@$items) {
         my $item_id  = $UUID->create_hex();
         my $item_key = sprintf '%s-%s', $self->queue_name, $item_id;
 
@@ -181,7 +184,7 @@ sub _claim_item_internal {
         $n_items = 1;
     }
 
-    if ( $n_items == 1 and !$do_blocking ) {
+    if ( $n_items == 1 and $do_blocking == CLAIM_NONBLOCKING ) {
         return unless my $item_key = $redis_handle->rpoplpush($self->_unprocessed_queue, $self->_working_queue);
 
         my %metadata = $redis_handle->hgetall("meta-$item_key");
@@ -193,9 +196,9 @@ sub _claim_item_internal {
             metadata => \%metadata,
         });
     }
-    elsif ( $n_items == 1 and $do_blocking ) {
+    elsif ( $n_items == 1 and $do_blocking == CLAIM_BLOCKING ) {
         my $item_key = $redis_handle->rpoplpush($self->_unprocessed_queue, $self->_working_queue)
-               || $redis_handle->brpoplpush($self->_unprocessed_queue, $self->_working_queue);
+               || $redis_handle->brpoplpush($self->_unprocessed_queue, $self->_working_queue, $self->claim_wait_timeout);
 
         return unless $item_key;
 
@@ -296,13 +299,7 @@ sub mark_item_as_processed {
             $lrem_direction,
             $item_key,
             sub {
-                my $success = $_[0];
-                if ( $success ) {
-                    my @item_keys = ("meta-$item_key", "item-$item_key");
-                    my $keys_removed = $redis_handle->del(@item_keys);
-                    $keys_removed == 2 or warn sprintf '%s->mark_item_as_processed: could not DEL meta_key=%s or payload_key=%s', __PACKAGE__, @item_keys[0,1];
-                }
-                my $result_key = $success ? 'flushed' : 'failed';
+                my $result_key = $_[0] ? 'flushed' : 'failed';
                 push @{ $result{$result_key} } => $item_key;
             }
         );
@@ -312,9 +309,25 @@ sub mark_item_as_processed {
 
     my ($flushed, $failed) = @result{qw/flushed failed/};
 
+    my @to_purge = @$flushed;
+
+    while (@to_purge) {
+        my @chunk = map  {; ("meta-$_" => "item-$_") }
+                    grep { defined $_ }
+                    splice @to_purge, 0, 1000;
+
+        # warn Dumper({ delete_chunk => \@chunk });
+        my $deleted;
+        $redis_handle->del(@chunk, sub { $deleted += $_[0] ? $_[0] : 0 });
+        $redis_handle->wait_all_responses();
+        $deleted != @chunk and warn sprintf '%s->mark_item_as_processed: could not remove some meta or item keys', __PACKAGE__;
+    }
+
     if (@$failed) {
         warn sprintf '%s->mark_item_as_done: %d/%d items were not removed from working_queue=%s', __PACKAGE__, int(@$failed), int(@$flushed+@$failed), $self->_working_queue;
     }
+
+    # warn Dumper(\%result);
 
     return \%result;
 }

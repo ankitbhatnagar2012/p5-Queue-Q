@@ -17,8 +17,8 @@ assert(place == 0 or place == 1, 'requeue place should be 0 or 1')
 
 local n = redis.call('lrem', source_queue, 1, item_key)
 
-local payload_key  = 'item-' .. item_key
-local metadata_key = 'meta-' .. item_key
+local payload_key = 'item-' .. item_key
+local meta_key    = 'meta-' .. item_key
 
 if n > 0 then
     if place == 0 then
@@ -28,11 +28,10 @@ if n > 0 then
     end
 
     if string.len(error) > 0 then
-        local meta_key = 'meta-' .. item_key
         redis.call('hmset', meta_key, 'last_error', error)
     end
 
-    redis.call('hincrby', meta_key, process_count, 1)
+    redis.call('hincrby', meta_key, 'process_count', 1)
 end
 
 return n

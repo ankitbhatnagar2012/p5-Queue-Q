@@ -68,6 +68,9 @@ use Class::XSAccessor {
 };
 my $UUID = Data::UUID::MT->new( version => '4s' );
 
+################################################################################
+################################################################################
+
 sub new {
     my ($class, %params) = @_;
 
@@ -116,6 +119,9 @@ sub new {
 
     return $self;
 }
+
+################################################################################
+################################################################################
 
 sub enqueue_item {
     my $self = shift;
@@ -166,6 +172,9 @@ sub enqueue_item {
     return \@created;
 }
 
+################################################################################
+################################################################################
+
 sub claim_item {
     my ($self, $n_items) = @_;
     $self->_claim_item_internal($n_items, CLAIM_BLOCKING);
@@ -182,7 +191,7 @@ sub _claim_item_internal {
     my $timeout           = $self->claim_wait_timeout;
     my $redis_handle      = $self->redis_handle;
     my $unprocessed_queue = $self->_unprocessed_queue;
-    my $working_queue        = $self->_working_queue;
+    my $working_queue     = $self->_working_queue;
 
     unless ( defined $n_items and $n_items > 0 ) {
         $n_items = 1;
@@ -191,11 +200,13 @@ sub _claim_item_internal {
     if ( $n_items == 1 and $do_blocking == CLAIM_NONBLOCKING ) {
         return unless my $item_key = $redis_handle->rpoplpush($self->_unprocessed_queue, $self->_working_queue);
 
+        $redis_handle->hincrby("meta-$item_key" => process_count => 1, sub { });
+
         my %metadata = $redis_handle->hgetall("meta-$item_key");
         my $payload  = $redis_handle->get("item-$item_key");
 
         return Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
-            item_key      => $item_key,
+            item_key => $item_key,
             payload  => $payload,
             metadata => \%metadata,
         });
@@ -205,6 +216,8 @@ sub _claim_item_internal {
                || $redis_handle->brpoplpush($self->_unprocessed_queue, $self->_working_queue, $self->claim_wait_timeout);
 
         return unless $item_key;
+
+        $redis_handle->hincrby("meta-$item_key" => process_count => 1, sub { });
 
         my %metadata = $redis_handle->hgetall("meta-$item_key");
         my $payload  = $redis_handle->get("item-$item_key");
@@ -228,6 +241,7 @@ sub _claim_item_internal {
         my $handler = sub {
             return unless defined(my $item_key = $_[0]);
 
+            $redis_handle->hincrby("meta-$item_key" => process_count => 1, sub { });
             my %metadata = $redis_handle->hgetall("meta-$item_key");
             my $payload  = $redis_handle->get("item-$item_key");
 
@@ -275,6 +289,9 @@ sub _claim_item_internal {
 
     die sprintf '%s->_claim_item_internal: how did we end up here?', __PACKAGE__;
 }
+
+################################################################################
+################################################################################
 
 sub mark_item_as_processed {
     my $self = shift;
@@ -337,41 +354,66 @@ sub mark_item_as_processed {
     return \%result;
 }
 
+################################################################################
+################################################################################
+
 sub unclaim  {
     my $self = shift;
-    return $self->__requeue_busy(1, undef, @_);
+
+    return $self->__requeue_busy(
+        place        => 1,
+        error        => undef,
+        items        => \@_,
+        source_queue => $self->_working_queue,
+    );
 }
 
 sub requeue_busy {
     my $self = shift;
-    return $self->__requeue_busy(0, undef, @_);
+    return $self->__requeue_busy(
+        place        => 0,
+        error        => undef,
+        items        => \@_,
+        source_queue => $self->_working_queue,
+    );
 }
 
 sub requeue_busy_error {
-    my $self = shift;
-    my $error= shift;
-    return $self->__requeue_busy(0, $error, @_);
+    my $self  = shift;
+    my $error = shift;
+
+    return $self->__requeue_busy(
+        place        => 0,
+        error        => $error,
+        items        => \@_,
+        source_queue => $self->_working_queue,
+    );
 }
 
 sub __requeue_busy  {
-    my $self  = shift;
-    my $place = shift; # 0: producer side, 1: consumer side
-    my $error = shift; # error message
+    my ($self, $params) = @_;
 
     my $items_requeued = 0;
     my $number_of_keys = 2; # we need to specify that the first two arguments refer to specific redis keys
     my $script_name = 'requeue_busy_ng2000';
 
+    my $source_queue = $params->{source_queue}
+    or die sprintf q{%s->__requeue_busy: missing source_queue param}, __PACKAGE__;
+
     eval {
         foreach my $item (@_) {
+
+            my $destination_queue = $item->{metadata}{process_count} <= $self->requeue_limit 
+                ? $self->_unprocessed_queue
+                : $self->_failed_queue;
+
             $items_requeued += $self->_lua->call(
                 $script_name,
                 $number_of_keys,
-                $self->_working_queue,
-                $self->_unprocessed_queue,
+                $source_queue,
+                $destination_queue,
                 $item->{item_key},
-                $place,
-                $error,
+                @$params{qw/ place error /},
             );
         }
         1;
@@ -384,6 +426,9 @@ sub __requeue_busy  {
     return $items_requeued;
 }
 
+################################################################################
+################################################################################
+
 sub queue_length {
     my ($self, $subqueue_name) = @_;
 
@@ -395,6 +440,9 @@ sub queue_length {
     my ($llen) = $self->redis_handle->llen($subqueue_redis_key);
     return $llen;
 }
+
+################################################################################
+################################################################################
 
 # this function returns the oldest item in the queue
 sub peek_item {
@@ -423,6 +471,9 @@ sub peek_item {
     return $item;
 }
 
+################################################################################
+################################################################################
+
 sub age {
     my ($self, $subqueue_name) = @_;
 
@@ -439,6 +490,9 @@ sub age {
     my $time_created = $redis_handle->hget("meta-$item_key" => 'time_created') || Time::HiRes::time();
     return Time::HiRes::time() - $time_created;
 }
+
+################################################################################
+################################################################################
 
 sub percent_memory_used {
     my ($self) = @_;
@@ -457,6 +511,9 @@ sub percent_memory_used {
 
     return $mem_used == 0 ? 0 : ( $mem_used / $mem_avail ) * 100;
 }
+
+################################################################################
+################################################################################
 
 sub raw_items_unprocessed {
     my $self = shift;
@@ -482,5 +539,120 @@ sub _raw_items {
 
     my @item_keys = $self->redis_handle->lrange($subqueue_redis_key, -$n, -1);
 }
+
+################################################################################
+################################################################################
+
+sub handle_expired_items {
+    my ($self, $timeout, $action) = @_;
+
+    $timeout ||= $self->busy_expiry_time;
+
+    die "timeout should be a number> 0" if not int($timeout);
+
+    my %valid_actions = map { $_ => 1 } qw/requeue drop/;
+
+    unless ( $action and $valid_actions{$action} ) {
+        die sprintf '%s->handle_expired_items: unknown action %s', __PACKAGE__, $action;
+    }
+
+    my $r = $self->redis_handle;
+
+    my @item_keys = $r->lrange($self->_working_queue, 0, -1);
+
+    my %item_metadata;
+
+    foreach my $item_key (@item_keys) {
+        $r->hgetall("meta-$item_key" => sub {
+            $item_metadata{$item_key} = { @_ };
+        });
+    }
+
+    $r->wait_all_responses;
+
+    my $now = Time::HiRes::time;
+    my $window = $now - $timeout;
+
+    my @expired_items;
+
+    for my $item_key (grep { $item_metadata{$_}{time_enqueued} < $window } @item_keys) {
+
+        my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new(
+            item_key => $item_key,
+            metadata => $item_metadata{$item_key},
+        );
+
+        my $n;
+        if ( $action eq 'requeue' ) {
+            $n = $self->requeue_busy($item);
+        }
+        elsif ( $action eq 'drop' ) {
+            $n = $r->lrem( $self->_working_queue, -1, $item_key);
+        }
+
+        $n and push @expired_items, $item;
+    }
+
+    return \@expired_items;
+}
+
+################################################################################
+################################################################################
+
+sub handle_failed_items {
+    my ($self, $action) = @_;
+
+    my %valid_actions = map { $_ => 1 } qw/requeue return/;
+
+    unless ( $action and $valid_actions{$action} ) {
+        die sprintf '%s->handle_failed_items: unknown action %s', __PACKAGE__, $action;
+    }
+
+    my $r = $self->redis_handle;
+
+    my @item_keys = $r->lrange($self->_failed_queue, 0, -1);
+
+    my %item_metadata;
+
+    foreach my $item_key (@item_keys) {
+        $r->hgetall("meta-$item_key" => sub {
+            $item_metadata{$item_key} = { @_ };
+        });
+    }
+
+    $r->wait_all_responses;
+
+    my @failed_items;
+
+    for my $item_key (@item_keys) {
+
+        my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new(
+            item_key => $item_key,
+            metadata => $item_metadata{$item_key},
+        );
+
+        my $n;
+        if ( $action eq 'requeue' ) {
+
+
+            $n += $self->__requeue_busy(
+                place        => 0,
+                error        => $item_metadata{$item_key}{last_error},
+                items        => [$item],
+                source_queue => $self->_failed_queue,
+            );
+        }
+        elsif ( $action eq 'return' ) {
+            $n = $r->lrem( $self->_failed_queue, -1, $item_key);
+        }
+
+        $n and push @failed_items, $item;
+    }
+
+    return \@failed_items;
+}
+
+################################################################################
+################################################################################
 
 1;

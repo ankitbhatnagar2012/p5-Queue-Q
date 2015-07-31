@@ -9,4 +9,4 @@ for my $file (glob('*.lua')) {
     (my $key = $file) =~ s/\.lua$//;
     push @chunks, "\n$key => q{\n" . scalar read_file($file) . "}";
 }
-print '%scripts = (' , join(',', @chunks) , ");\n";
+print '%Scripts = (' , join(',', @chunks) , ");\n";

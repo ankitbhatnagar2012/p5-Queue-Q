@@ -4,11 +4,12 @@ use strict;
 use warnings;
 
 use Data::Dumper;
-use Carp qw/croak/;
+use Carp qw/croak cluck/;
 use Data::UUID::MT;
 use Redis qw//;
 use Time::HiRes qw//;
 
+use Queue::Q::ReliableFIFO::Lua;
 use Queue::Q::ReliableFIFO::ItemNG2000TopFun;
 
 use constant {
@@ -107,6 +108,10 @@ sub new {
         %default_redis_options, %redis_options,
     );
 
+    $self->{_lua} = Queue::Q::ReliableFIFO::Lua->new(
+        redis_conn => $self->redis_handle,
+    );
+
     $self->redis_handle->select($params{db_id}) if $params{db_id};
 
     return $self;
@@ -165,7 +170,6 @@ sub claim_item {
     my ($self, $n_items) = @_;
     $self->_claim_item_internal($n_items, CLAIM_BLOCKING);
 }
-
 
 sub claim_item_nonblocking {
     my ($self, $n_items) = @_;
@@ -314,14 +318,15 @@ sub mark_item_as_processed {
     while (@to_purge) {
         my @chunk = map  {; ("meta-$_" => "item-$_") }
                     grep { defined $_ }
-                    splice @to_purge, 0, 1000;
+                    splice @to_purge, 0, 100;
 
         # warn Dumper({ delete_chunk => \@chunk });
         my $deleted;
         $redis_handle->del(@chunk, sub { $deleted += $_[0] ? $_[0] : 0 });
-        $redis_handle->wait_all_responses();
         $deleted != @chunk and warn sprintf '%s->mark_item_as_processed: could not remove some meta or item keys', __PACKAGE__;
     }
+
+    $redis_handle->wait_all_responses();
 
     if (@$failed) {
         warn sprintf '%s->mark_item_as_done: %d/%d items were not removed from working_queue=%s', __PACKAGE__, int(@$failed), int(@$flushed+@$failed), $self->_working_queue;
@@ -330,6 +335,49 @@ sub mark_item_as_processed {
     # warn Dumper(\%result);
 
     return \%result;
+}
+
+sub unclaim  {
+    my $self = shift;
+    return $self->__requeue_busy(1, undef, @_);
+}
+
+sub requeue_busy {
+    my $self = shift;
+    return $self->__requeue_busy(0, undef, @_);
+}
+
+sub requeue_busy_error {
+    my $self = shift;
+    my $error= shift;
+    return $self->__requeue_busy(0, $error, @_);
+}
+
+sub __requeue_busy  {
+    my $self  = shift;
+    my $place = shift; # 0: producer side, 1: consumer side
+    my $error = shift; # error message
+    my $n = 0;
+    my $number_of_keys = 2; # we need to specify that the first two arguments refer to specific redis keys
+    eval {
+        foreach my $item (@_) {
+            $n += $self->_lua->call(
+                'requeue_busy_ng2000',
+                $number_of_keys,
+                $self->_working_queue,
+                $self->_unprocessed_queue,
+                $item->{item_key},
+                $place,
+                $error,
+            );
+        }
+        1;
+    }
+    or do {
+        my $eval_error = $@ || 'zombie lua error';
+        cluck("Lua call went wrong: $eval_error");
+    };
+    return $n;
 }
 
 1;

@@ -458,4 +458,29 @@ sub percent_memory_used {
     return $mem_used == 0 ? 0 : ( $mem_used / $mem_avail ) * 100;
 }
 
+sub raw_items_unprocessed {
+    my $self = shift;
+    return $self->_raw_items('unprocessed', @_);
+}
+
+sub raw_items_working {
+    my $self = shift;
+    return $self->_raw_items('working', @_);
+}
+
+sub raw_items_failed {
+    my $self = shift;
+    return $self->_raw_items('failed', @_);
+}
+
+sub _raw_items {
+    my ($self, $subqueue_name, $n) = @_;
+
+    $n ||= 0;
+
+    my $subqueue_redis_key = sprintf '%s_%s', $self->queue_name, $subqueue_name;
+
+    my @item_keys = $self->redis_handle->lrange($subqueue_redis_key, -$n, -1);
+}
+
 1;

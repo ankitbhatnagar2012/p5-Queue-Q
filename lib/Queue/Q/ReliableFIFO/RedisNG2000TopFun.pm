@@ -357,12 +357,15 @@ sub __requeue_busy  {
     my $self  = shift;
     my $place = shift; # 0: producer side, 1: consumer side
     my $error = shift; # error message
-    my $n = 0;
+
+    my $items_requeued = 0;
     my $number_of_keys = 2; # we need to specify that the first two arguments refer to specific redis keys
+    my $script_name = 'requeue_busy_ng2000';
+
     eval {
         foreach my $item (@_) {
-            $n += $self->_lua->call(
-                'requeue_busy_ng2000',
+            $items_requeued += $self->_lua->call(
+                $script_name,
                 $number_of_keys,
                 $self->_working_queue,
                 $self->_unprocessed_queue,
@@ -375,9 +378,10 @@ sub __requeue_busy  {
     }
     or do {
         my $eval_error = $@ || 'zombie lua error';
-        cluck("Lua call went wrong: $eval_error");
+        cluck("Lua call went wrong inside $script_name: $eval_error");
     };
-    return $n;
+
+    return $items_requeued;
 }
 
 # this function returns the oldest item in the queue

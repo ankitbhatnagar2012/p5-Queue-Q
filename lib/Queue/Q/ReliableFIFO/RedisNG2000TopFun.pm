@@ -26,7 +26,6 @@ BEGIN {
         working
         processed
         failed
-        temp
     /;
 
     # valid constructor params
@@ -346,7 +345,7 @@ sub mark_item_as_processed {
     $redis_handle->wait_all_responses();
 
     if (@$failed) {
-        warn sprintf '%s->mark_item_as_done: %d/%d items were not removed from working_queue=%s', __PACKAGE__, int(@$failed), int(@$flushed+@$failed), $self->_working_queue;
+        warn sprintf '%s->mark_item_as_processed: %d/%d items were not removed from working_queue=%s', __PACKAGE__, int(@$failed), int(@$flushed+@$failed), $self->_working_queue;
     }
 
     # warn Dumper(\%result);
@@ -357,24 +356,26 @@ sub mark_item_as_processed {
 ################################################################################
 ################################################################################
 
-sub unclaim  {
+sub unclaim {
     my $self = shift;
 
-    return $self->__requeue_busy(
-        place        => 1,
-        error        => undef,
-        items        => \@_,
-        source_queue => $self->_working_queue,
+    return $self->__requeue(
+        source_queue            => $self->_working_queue,
+        items                   => \@_,
+        increment_process_count => 0,
+        place                   => 1,
+        error                   => undef,
     );
 }
 
 sub requeue_busy {
     my $self = shift;
-    return $self->__requeue_busy(
+
+    return $self->__requeue(
+        source_queue => $self->_working_queue,
+        items        => \@_,
         place        => 0,
         error        => undef,
-        items        => \@_,
-        source_queue => $self->_working_queue,
     );
 }
 
@@ -382,48 +383,84 @@ sub requeue_busy_error {
     my $self  = shift;
     my $error = shift;
 
-    return $self->__requeue_busy(
+    return $self->__requeue(
+        source_queue => $self->_working_queue,
+        items        => \@_,
         place        => 0,
         error        => $error,
-        items        => \@_,
-        source_queue => $self->_working_queue,
     );
 }
 
-sub __requeue_busy  {
+sub requeue_failed_items {
+    my $self = shift;
+    my $error = shift;
+
+    return $self->__requeue(
+        source_queue => $self->_working_queue,
+        items        => \@_,
+        place        => 1,
+        error        => $error,
+    );
+}
+
+sub __requeue  {
     my ($self, $params) = @_;
 
-    my $items_requeued = 0;
-    my $number_of_keys = 2; # we need to specify that the first two arguments refer to specific redis keys
-    my $script_name = 'requeue_busy_ng2000';
+    my $place = $params->{place} // 0;
+    my $error = $params->{error} // '';
+    my $increment_process_count = $params->{increment_process_count} // 1;
 
     my $source_queue = $params->{source_queue}
-    or die sprintf q{%s->__requeue_busy: missing source_queue param}, __PACKAGE__;
+    or die sprintf q{%s->__requeue: missing source_queue param}, __PACKAGE__;
+
+    my $items_requeued = 0;
 
     eval {
         foreach my $item (@_) {
-
-            my $destination_queue = $item->{metadata}{process_count} <= $self->requeue_limit 
-                ? $self->_unprocessed_queue
-                : $self->_failed_queue;
-
             $items_requeued += $self->_lua->call(
-                $script_name,
-                $number_of_keys,
+                'requeue' => 3, # Requeue takes 3 keys, the source, ok-destination and fail-destination queues.
                 $source_queue,
-                $destination_queue,
+                $self->_unprocessed_queue,
+                $self->_failed_queue,
                 $item->{item_key},
-                @$params{qw/ place error /},
+                $self->requeue_limit,
+                $place,
+                $error,
+                $increment_process_count,
             );
         }
         1;
     }
     or do {
         my $eval_error = $@ || 'zombie lua error';
-        cluck("Lua call went wrong inside $script_name: $eval_error");
+        cluck("Lua call went wrong: $eval_error");
     };
 
     return $items_requeued;
+}
+
+################################################################################
+################################################################################
+
+sub process_failed_items {
+    my ($self, $callback) = @_
+    # FIXME - rename failed to temp-$RAND and feed each item to $callback->()
+}
+
+sub remove_failed_items {
+    # FIXME - call process_failed_items with a specific callback like old code
+}
+
+################################################################################
+################################################################################
+
+sub flush_queue {
+    my $self = shift;
+    my $redis = $self->redis_handle;
+    $redis->multi;
+    $redis->del($_) for values %VALID_SUBQUEUES;
+    $redis->exec;
+    return;
 }
 
 ################################################################################
@@ -634,13 +671,16 @@ sub handle_failed_items {
         my $n;
         if ( $action eq 'requeue' ) {
 
-
-            $n += $self->__requeue_busy(
-                place        => 0,
-                error        => $item_metadata{$item_key}{last_error},
-                items        => [$item],
-                source_queue => $self->_failed_queue,
+            $n += $self->__requeue(
+                source_queue            => $self->_failed_queue,
+                items                   => [$item],
+                place                   => 0,
+                error                   => $item_metadata{$item_key}{last_error},
+                # items in failed queue already have process_count=0.
+                # this ensures we don't count another attempt:
+                increment_process_count => 0,
             );
+
         }
         elsif ( $action eq 'return' ) {
             $n = $r->lrem( $self->_failed_queue, -1, $item_key);
@@ -655,4 +695,18 @@ sub handle_failed_items {
 ################################################################################
 ################################################################################
 
+# Legacy method names
+
+{
+    no warnings 'once';
+    *mark_item_as_done   = \&mark_item_as_processed;
+    *requeue_busy_item   = \&requeue_busy;
+    *requeue_failed_item = \&requeue_failed_items;
+    *memory_usage_perc   = \&percent_memory_used;
+    *raw_items_main      = \&raw_items_unprocessed;
+    *raw_items_busy      = \&raw_items_working;
+}
+
+################################################################################
+################################################################################
 1;

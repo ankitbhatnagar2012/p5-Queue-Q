@@ -20,8 +20,11 @@ BEGIN {
     $TEST_CLASS = $ENV{TEST_CLASS} ? sprintf('Queue::Q::ReliableFIFO::%s', $ENV{TEST_CLASS}) : 'Queue::Q::ReliableFIFO::RedisNG2000TopFun';
 }
 
-use constant { 
-    TEST_CLASS => $TEST_CLASS,
+use constant {
+    TEST_CLASS      => $TEST_CLASS,
+    TEST_HOST       => $ENV{QUEUE_Q_TEST_HOST}       || 'localhost',
+    TEST_PORT       => $ENV{QUEUE_Q_TEST_PORT}       || 6379,
+    TEST_QUEUE_NAME => $ENV{QUEUE_Q_TEST_QUEUE_NAME} || 'test_queue',
 };
 
 sub say_with_time {
@@ -36,7 +39,7 @@ sub main {
     $mode =~ s/[-][-]//;
 
     # open $log_fh, '>>', "$mode.log";
-    open $log_fh, '>>', \*STDOUT;
+    $log_fh = *STDOUT;
     $log_fh->autoflush(1);
 
     my %workers = (
@@ -51,7 +54,7 @@ sub main {
         cleaner  => 1,
     );
 
-    say_with_time "$TEST_CLASS $mode parent starting up";
+    say_with_time "$TEST_CLASS $mode parent starting up, max_workers=$max_workers{$mode}";
 
     my @children;
     my @exited;
@@ -101,7 +104,7 @@ sub main {
 sub run_in_producer {
     say_with_time "$TEST_CLASS producer child starting up";
 
-    my $q = $TEST_CLASS->new(server => 'localhost', port => 6379, queue_name => 'throughput_test');
+    my $q = $TEST_CLASS->new(server => TEST_HOST, port => TEST_PORT, queue_name => TEST_QUEUE_NAME);
     my $r = $q->can('redis_handle') ? $q->redis_handle : $q->redis_conn;
 
     my $id = 1;
@@ -128,7 +131,7 @@ sub run_in_producer {
 
 sub run_in_consumer {
     say_with_time "$TEST_CLASS consumer child starting up";
-    my $q = $TEST_CLASS->new(server => 'localhost', port => 6379, queue_name => 'throughput_test');
+    my $q = $TEST_CLASS->new(server => TEST_HOST, port => TEST_PORT, queue_name => TEST_QUEUE_NAME);
 
     my $done = 0;
 
@@ -164,7 +167,7 @@ sub run_in_consumer {
 
 sub run_in_cleaner {
     say_with_time "$TEST_CLASS cleaner starting up";
-    my $q = $TEST_CLASS->new(server => 'localhost', port => 6379, queue_name => 'throughput_test');
+    my $q = $TEST_CLASS->new(server => TEST_HOST, port => TEST_PORT, queue_name => TEST_QUEUE_NAME);
 
     my $done = 0;
 

@@ -436,12 +436,83 @@ sub __requeue  {
 ################################################################################
 
 sub process_failed_items {
-    my ($self, $callback) = @_
-    # FIXME - rename failed to temp-$RAND and feed each item to $callback->()
+    my ($self, $max_count, $callback) = @_;
+
+    my $temp_table = 'temp-failed-' . $UUID->create_hex(); # Include queue_name too?
+    my $redis_handle = $self->redis_handle;
+
+    $redis_handle->renamenx($self->_failed_queue, $temp_table)
+        or die 'Cosmic ray detected';
+
+    my $error_count;
+    my @item_keys = $redis_handle->lrange($temp_table, 0, $max_count ? $max_count : -1 );
+    my $item_count = @item_keys;
+
+    foreach my $item_key (@item_keys) {
+        eval {
+            my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+                item_key => $item_key,
+                payload  => $redis_handle->get("item-$item_key") || undef,
+                metadata => { $redis_handle->hgetall("meta-$item_key") },
+            });
+
+            $callback->($item);
+        } or do {
+            $error_count++;
+        };
+    }
+
+    if ($max_count) {
+        $redis_handle->ltrim($temp_table, 0, $max_count );
+        # move overflow items back to failed queue
+        if ($item_count == $max_count) {
+            while ( $redis_handle->rpoplpush($temp_table, $self->_failed_queue ) ) {}
+        }
+    }
+
+    $redis_handle->del($temp_table);
+
+    return ($item_count, $error_count);
 }
 
 sub remove_failed_items {
-    # FIXME - call process_failed_items with a specific callback like old code
+    my ($self, %options) = @_;
+
+    my $min_age  = delete $options{MinAge}       || 0;
+    my $min_fc   = delete $options{MinFailCount} || 0;
+    my $chunk    = delete $options{Chunk}        || 100;
+    my $loglimit = delete $options{LogLimit}     || 100;
+    cluck("Invalid option: $_") for (keys %options);
+
+    my $now = Time::HiRes::time;
+    my $tc_min = $now - $min_age;
+
+    my $redis_handle = $self->redis_handle;
+    my $failed_queue = $self->_failed_queue;
+
+    my @items_removed;
+
+    my ($item_count, $error_count) = $self->process_failed_items($chunk,
+    sub {
+        my $item = shift;
+
+        if ($item->{metadata}{process_count} >= $min_fc || $item->{metadata}{time_created} < $tc_min) {
+            my $item_key = $item->{item_key};
+            $redis_handle->del("item-$item_key");
+            $redis_handle->del("meta-$item_key");
+            push @items_removed, $item
+                unless ($loglimit && $#items_removed > $loglimit);
+        } else {
+            $redis_handle->lpush($failed_queue, $item->{item_key});
+        }
+
+        return 1; # success
+    });
+
+    warn "Encountered $error_count errors while removing $item_count failed items"
+        if $error_count;
+
+    return ($item_count, \@items_removed);
 }
 
 ################################################################################

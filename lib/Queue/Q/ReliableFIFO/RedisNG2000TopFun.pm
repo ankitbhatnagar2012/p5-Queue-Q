@@ -334,12 +334,13 @@ sub mark_item_as_processed {
                     grep { defined $_ }
                     splice @to_purge, 0, 100;
 
-        my $deleted;
+        my $deleted = 0;
         $redis_handle->del(@chunk, sub { $deleted += $_[0] ? $_[0] : 0 });
+        $redis_handle->wait_all_responses();
         $deleted != @chunk and warn sprintf '%s->mark_item_as_processed: could not remove some meta or item keys', __PACKAGE__;
     }
 
-    $redis_handle->wait_all_responses();
+    # $redis_handle->wait_all_responses();
 
     if (@$failed) {
         warn sprintf '%s->mark_item_as_processed: %d/%d items were not removed from working_queue=%s', __PACKAGE__, int(@$failed), int(@$flushed+@$failed), $self->_working_queue;
@@ -354,48 +355,48 @@ sub mark_item_as_processed {
 sub unclaim {
     my $self = shift;
 
-    return $self->__requeue(
+    return $self->__requeue({
         source_queue            => $self->_working_queue,
         items                   => \@_,
         increment_process_count => 0,
         place                   => 1,
         error                   => undef,
-    );
+    });
 }
 
 sub requeue_busy {
     my $self = shift;
 
-    return $self->__requeue(
+    return $self->__requeue({
         source_queue => $self->_working_queue,
         items        => \@_,
         place        => 0,
         error        => undef,
-    );
+    });
 }
 
 sub requeue_busy_error {
     my $self  = shift;
     my $error = shift;
 
-    return $self->__requeue(
+    return $self->__requeue({
         source_queue => $self->_working_queue,
         items        => \@_,
         place        => 0,
         error        => $error,
-    );
+    });
 }
 
 sub requeue_failed_items {
     my $self = shift;
     my $error = shift;
 
-    return $self->__requeue(
+    return $self->__requeue({
         source_queue => $self->_working_queue,
         items        => \@_,
         place        => 1,
         error        => $error,
-    );
+    });
 }
 
 sub __requeue  {
@@ -411,7 +412,7 @@ sub __requeue  {
     my $items_requeued = 0;
 
     eval {
-        foreach my $item (@_) {
+        foreach my $item (@{$params->{items}}) {
             $items_requeued += $self->_lua->call(
                 requeue => 3, # Requeue takes 3 keys, the source, ok-destination and fail-destination queues:
                 $source_queue, $self->_unprocessed_queue, $self->_failed_queue,

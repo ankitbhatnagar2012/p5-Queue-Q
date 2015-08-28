@@ -4,7 +4,7 @@ use 5.14.2;
 use strict;
 use warnings;
 
-use lib "../../..";
+use lib '../lib';
 
 use Data::UUID::MT;
 use Queue::Q::ReliableFIFO::Redis;
@@ -35,24 +35,26 @@ sub main {
 
     $mode =~ s/[-][-]//;
 
-    open $log_fh, '>>', "$mode.log";
+    # open $log_fh, '>>', "$mode.log";
+    open $log_fh, '>>', \*STDOUT;
     $log_fh->autoflush(1);
 
     my %workers = (
         producer => \&run_in_producer,
         consumer => \&run_in_consumer,
+        cleaner  => \&run_in_cleaner,
     );
 
     my %max_workers = (
         producer => $ENV{MAX_WORKERS} || 30,
         consumer => $ENV{MAX_WORKERS} || 60,
+        cleaner  => 1,
     );
 
     say_with_time "$TEST_CLASS $mode parent starting up";
 
     my @children;
     my @exited;
-    my $chunk_size = 1000;
 
     while (1) {
         
@@ -62,8 +64,8 @@ sub main {
                 push @children, $pid;
             }
             else {
-                open $log_fh, '>>', "$mode.log";
-                $log_fh->autoflush(1);
+                # open $log_fh, '>>', "$mode.log";
+                # $log_fh->autoflush(1);
                 $workers{$mode}->();
                 exit();
             }
@@ -112,7 +114,7 @@ sub run_in_producer {
         my @items = map { sprintf q|{ pid: %d, counter: %d, UUID: %s }|, $$, $id++, $UUID->create_hex } ( 1 .. 1000 );
         say_with_time "$TEST_CLASS enqueueing 1000 items";
         # eval { do { $q->enqueue_item($_); print "\n" } for @items } or do { warn "enqueue error: $@" };
-        eval { $q->enqueue_item($_) for @items } or do { warn "enqueue error: $@" };
+        eval { $q->enqueue_item(@items); 1; } or do { warn "enqueue error: $@" };
         say_with_time "$TEST_CLASS producer child inserted batch of 1000";
         last if rand(100) > 95;
         last if time() - $^T > rand(20) + 20;
@@ -138,7 +140,11 @@ sub run_in_consumer {
         if ( TEST_CLASS eq 'Queue::Q::ReliableFIFO::RedisNG2000TopFun' and $item ) {
             $done++;
             # print "\n";
-            $q->mark_item_as_processed($item);
+            if (rand(100) < 20) {
+                $q->requeue_busy_error('Chaos monkey', $item);
+            } else {
+                $q->mark_item_as_processed($item);
+            }
         }
         elsif ( TEST_CLASS eq 'Queue::Q::ReliableFIFO::Redis' and $item ) {
             $done++;
@@ -154,6 +160,28 @@ sub run_in_consumer {
     }
 
     say_with_time sprintf '%s consumer child exiting, did %d items at a rate of %.02f/sec', $TEST_CLASS, $done, $done / ( Time::HiRes::time() - $^T );
+}
+
+sub run_in_cleaner {
+    say_with_time "$TEST_CLASS cleaner starting up";
+    my $q = $TEST_CLASS->new(server => 'localhost', port => 6379, queue_name => 'throughput_test');
+
+    my $done = 0;
+
+    until ( -f '/tmp/stop' ) {
+        my $thing;
+
+        my ($count, $items) = $q->remove_failed_items();
+
+        if ( TEST_CLASS eq 'Queue::Q::ReliableFIFO::RedisNG2000TopFun' and $count ) {
+            $done += $count;
+            say_with_time ("Removed $count items");
+        }
+
+        last if rand(10000) > 9990;
+    }
+
+    say_with_time sprintf '%s cleaner child exiting, did %d items at a rate of %.02f/sec', $TEST_CLASS, $done, $done / ( Time::HiRes::time() - $^T );
 }
 
 main(@ARGV);

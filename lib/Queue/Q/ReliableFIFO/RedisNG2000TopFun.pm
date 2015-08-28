@@ -665,7 +665,7 @@ sub handle_expired_items {
 
     foreach my $item_key (@item_keys) {
         $r->hgetall("meta-$item_key" => sub {
-            $item_metadata{$item_key} = { @_ };
+            $item_metadata{$item_key} = { @_ } if @_;
         });
     }
 
@@ -676,7 +676,7 @@ sub handle_expired_items {
 
     my @expired_items;
 
-    for my $item_key (grep { $item_metadata{$_}{time_enqueued} < $window } @item_keys) {
+    for my $item_key (grep { exists $item_metadata{$_} && $item_metadata{$_}{time_enqueued} < $window } @item_keys) {
 
         my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new(
             item_key => $item_key,

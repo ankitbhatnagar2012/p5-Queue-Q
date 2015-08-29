@@ -2,7 +2,7 @@
 package Queue::Q::ReliableFIFO::CLI;
 use strict;
 use Redis;
-use Term::ReadKey;
+use Term::ReadLine;
 use Data::Dumper;
 use JSON::XS;
 use File::Slurp;
@@ -30,7 +30,7 @@ use Class::XSAccessor {
 # @$path==1 -> /queue
 # @$path==2 -> /queue/type
 
-my @all_types = (qw(main busy failed ));
+my @all_types = (qw(main busy failed));
 my %type = map { $_ => undef } @all_types;
 
 sub open {
@@ -217,7 +217,7 @@ sub show_prompt {
     if (! defined $path) { $prompt = ''; }
     else { $prompt = "$s:$p (db=$d) \[ $pathstr \]" }
 
-    return 'FIFO:', $prompt, "-> ";
+    return join('' => 'FIFO:', $prompt, "-> ");
 }
 
 sub run {
@@ -240,8 +240,6 @@ sub run {
         $self->cd($type) if $type;
     }
     my $quit = sub {
-        ReadMode 0;
-
         # save setting for next session
         my %conf = ();
         if (defined $self->path) {
@@ -289,60 +287,19 @@ sub run {
     );
     push(@{$help{$_}}, ("?", "who", "hist", "quit")) for (0 .. 3);
 
-    ReadMode 4;
-    print "Type '?' for help\n";
-    print $self->show_prompt;
+    my $ver = join ".", map {ord} split(//, $^V);
+    my $term = Term::ReadLine->new("perl $ver");
+
+    print { $term->OUT } "Type '?' for help\n";
 
     while(1) {
-        my $line;
-        push @history, '';
+        my $line = $term->readline($self->show_prompt);
+        last if not defined $line;
+        chomp $line;
+        warn "input line: [$line]";
+
+        push @history, $line;
         $his_pos = $#history;
-
-        # deal with the keyboard
-        while (1) {
-            my $c = ReadKey(1);
-            next if ! defined $c;
-            my $ord = ord $c;
-
-            if ($ord == 3 || $ord == 4) {   # ctrl-c, ctrl-d
-                print "\n";
-                $quit->();
-            }
-            elsif ($ord == 127) {
-                print "\r" , $self->show_prompt , ' ' x length($line);
-                $line = substr($line, 0, length($line)-1);
-                print "\r", $self->show_prompt, $line;
-            }
-            elsif ($ord == 27) {
-                my $a = ord(ReadKey (1));
-                if ($a == 91) {
-                    my $b = ord(ReadKey (1));
-                    if ($b == 65 || $b == 66) {
-                        # arrow keys up/down
-                        print "\r" , $self->show_prompt , ' ' x length($line);
-                        if ($b == 65) {  # up
-                            $history[$his_pos] = $line if $his_pos == $#history;
-                            $his_pos-- if $his_pos > 0;
-                        }
-                        else {
-                            $his_pos++ if $his_pos < $#history;;
-                        }
-                        $line = $history[$his_pos];
-                        print "\r" ,  $self->show_prompt , $line;
-                    }
-                } # else ignore
-            }
-            elsif ($ord == 10) { #LF
-                $his_pos = $#history;
-                $history[$his_pos] = $line;
-                print $c;
-                last;
-            }
-            else {
-                $line .= $c;
-                print $c;
-            }
-        }
 
         # deal with the command
         my ($cmd, @args) = split /\s+/, $line;
@@ -404,7 +361,6 @@ sub run {
                 print "unknown command $cmd\n";
             }
         }
-        print $self->show_prompt;
     }
     $quit->();
 }

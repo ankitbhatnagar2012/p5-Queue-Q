@@ -217,7 +217,7 @@ sub show_prompt {
     if (! defined $path) { $prompt = ''; }
     else { $prompt = "$s:$p (db=$d) \[ $pathstr \]" }
 
-    return join('' => 'FIFO:', $prompt, "-> ");
+    return sprintf '%s:%s-> ', FIFO => $prompt;
 }
 
 sub run {
@@ -225,7 +225,6 @@ sub run {
     $| = 1;
 
     my @history;
-    my $his_pos = 0;
 
     # take settings from previous session
     my $conf_file = "$ENV{HOME}/.reliablefifo";
@@ -240,6 +239,7 @@ sub run {
         $self->cd($type) if $type;
     }
     my $quit = sub {
+        print "\n";
         # save setting for next session
         my %conf = ();
         if (defined $self->path) {
@@ -248,8 +248,6 @@ sub run {
             $conf{db} = $self->db;
             $conf{path} = $self->path;
         }
-        splice(@history, 0, $#history-20) if $#history > 20; # limit history
-        pop @history;   # remove empty item
         $conf{history} = \@history;
         write_file($conf_file, encode_json(\%conf));
 
@@ -289,6 +287,7 @@ sub run {
 
     my $ver = join ".", map {ord} split(//, $^V);
     my $term = Term::ReadLine->new("perl $ver");
+    $term->addhistory($_) for map {chomp; $_} @history;
 
     print { $term->OUT } "Type '?' for help\n";
 
@@ -296,10 +295,8 @@ sub run {
         my $line = $term->readline($self->show_prompt);
         last if not defined $line;
         chomp $line;
-        warn "input line: [$line]";
 
-        push @history, $line;
-        $his_pos = $#history;
+        $line and push @history, $line;
 
         # deal with the command
         my ($cmd, @args) = split /\s+/, $line;

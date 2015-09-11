@@ -3,6 +3,8 @@ package Queue::Q::ReliableFIFO::RedisNG2000TopFun;
 use strict;
 use warnings;
 
+use parent 'Queue::Q::ReliableFIFO';
+
 use Carp qw/croak cluck/;
 use Data::UUID::MT;
 use Redis qw//;

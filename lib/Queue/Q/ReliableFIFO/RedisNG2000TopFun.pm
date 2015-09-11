@@ -512,7 +512,7 @@ sub remove_failed_items {
             $redis_handle->del("item-$item_key");
             $redis_handle->del("meta-$item_key");
             push @items_removed, $item
-                unless ($loglimit && $#items_removed > $loglimit);
+                unless $#items_removed > $loglimit;
         } else {
             $redis_handle->lpush($failed_queue, $item->{item_key});
         }
@@ -660,10 +660,7 @@ sub raw_items_failed {
 sub _raw_items {
     my ($self, $subqueue_name, $n) = @_;
 
-    $n ||= 0;
-
     my $subqueue_redis_key = sprintf '%s_%s', $self->queue_name, $subqueue_name;
-
     my @item_keys = $self->redis_handle->lrange($subqueue_redis_key, -$n, -1);
 }
 

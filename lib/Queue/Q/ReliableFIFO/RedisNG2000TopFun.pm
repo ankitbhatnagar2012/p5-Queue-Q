@@ -41,19 +41,10 @@ BEGIN {
 
 use Class::XSAccessor {
     getters => [
-        values %VALID_SUBQUEUES, qw/
-            server
-            port
-            db_id
-            queue_name
-            busy_expiry_time
-            claim_wait_timeout
-            requeue_limit
-            redis_handle
-            redis_options
-            warn_on_requeue
-            _lua
-    /],
+        values %VALID_SUBQUEUES,
+        keys %VALID_PARAMS,
+        '_lua'
+    ],
     setters => {
         set_requeue_limit      => 'requeue_limit',
         set_busy_expiry_time   => 'busy_expiry_time',

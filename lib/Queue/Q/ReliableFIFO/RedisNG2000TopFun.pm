@@ -721,8 +721,8 @@ sub get_item_age {
     @item_key
         or return undef; # The queue is empty.
 
-    my $time_created = $rh->hget("meta-$item_key" => 'time_created') || Time::HiRes::time();
-    return Time::HiRes::time() - $time_created;
+    my $time_created = $rh->hget("meta-$item_key[0]", 'time_created');
+    return defined $time_created ? Time::HiRes::time() - $time_created : 0;
 }
 
 ####################################################################################################

@@ -279,7 +279,7 @@ sub _claim_item_internal {
         if ($n_items > 30) {
             # Yes, there is a race, but it's an optimization only.
             # This means that after we know how many items we have...
-            my ($llen) = $rh->llen($unprocessed_queue);
+            my $llen = $rh->llen($unprocessed_queue);
             $n_items > $llen
                 and $n_items = $llen;
         }
@@ -630,8 +630,7 @@ sub queue_length {
             __PACKAGE__, $subqueue_name
         );
 
-    my ($llen) = $self->redis_handle->llen($subqueue_redis_key);
-    return $llen;
+    return $self->redis_handle->llen($subqueue_redis_key);
 }
 
 ####################################################################################################

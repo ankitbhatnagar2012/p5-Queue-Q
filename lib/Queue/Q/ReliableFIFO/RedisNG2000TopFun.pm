@@ -733,8 +733,7 @@ sub percent_memory_used {
 
     my $rh = $self->redis_handle;
 
-    my (undef, $mem_avail) = $rh->config('get', 'maxmemory');
-
+    my (undef, $mem_avail) = $rh->config_get('maxmemory');
     if ($mem_avail == 0) {
         warn sprintf(
             q{%s->percent_memory_used(): "maxmemory" is set to 0, can't derive a percentage.},

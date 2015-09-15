@@ -591,7 +591,8 @@ sub remove_failed_items {
     my ($item_count, $error_count) = $self->process_failed_items($chunk, sub {
         my $item = shift;
 
-        if ($item->{metadata}{process_count} >= $min_fc || $item->{metadata}{time_created} < $tc_min) {
+        my $metadata = $item->{metadata};
+        if ($metadata->{process_count} >= $min_fc || $metadata->{time_created} < $tc_min) {
             my $item_key = $item->{item_key};
             $rh->del("item-$item_key");
             $rh->del("meta-$item_key");

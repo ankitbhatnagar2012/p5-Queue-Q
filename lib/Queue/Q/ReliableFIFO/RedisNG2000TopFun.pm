@@ -410,52 +410,65 @@ sub mark_item_as_processed {
 sub unclaim {
     my $self = shift;
 
-    return $self->__requeue({
-        source_queue            => $self->_working_queue,
-        items                   => \@_,
-        increment_process_count => 0,
-        place                   => 1,
-        error                   => undef,
-    });
+    return $self->__requeue(
+        {
+            caller                  => 'unclaim',
+            error                   => undef,
+            increment_process_count => 0,
+            place                   => 1,
+            source_queue            => $self->_working_queue
+        },
+        @_
+    );
 }
 
 sub requeue_busy {
     my $self = shift;
 
-    return $self->__requeue({
-        source_queue => $self->_working_queue,
-        items        => \@_,
-        place        => 0,
-        error        => undef,
-    });
+    return $self->__requeue(
+        {
+            caller       => 'requeue_busy',
+            error        => '',
+            place        => 0,
+            source_queue => $self->_working_queue
+        },
+        @_
+    );
 }
 
 sub requeue_busy_error {
     my $self  = shift;
     my $error = shift;
 
-    return $self->__requeue({
-        source_queue => $self->_working_queue,
-        items        => \@_,
-        place        => 0,
-        error        => $error,
-    });
+    return $self->__requeue(
+        {
+            caller       => 'requeue_busy_error',
+            error        => $error,
+            place        => 0,
+            source_queue => $self->_working_queue,
+        },
+        @_
+    );
 }
 
 sub requeue_failed_items {
     my $self = shift;
     my $error = shift;
 
-    return $self->__requeue({
-        source_queue => $self->_working_queue,
-        items        => \@_,
-        place        => 1,
-        error        => $error,
-    });
+    return $self->__requeue(
+        {
+            caller       => 'requeue_failed_items',
+            error        => $error,
+            place        => 1,
+            source_queue => $self->_working_queue
+        },
+        @_
+    );
 }
 
 sub __requeue  {
-    my ($self, $params) = @_;
+    my $self = shift;
+    my $params = shift;
 
     my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY' ) ? $_[0] : [ @_ ];
 
@@ -475,7 +488,7 @@ sub __requeue  {
     my $items_requeued = 0;
 
     eval {
-        foreach my $item (@{$params->{items}}) {
+        foreach my $item (@$items) {
             $items_requeued += $self->_lua->call(
                 requeue => 3, # Requeue takes 3 keys, the source, ok-destination and fail-destination queues:
                 $source_queue, $self->_unprocessed_queue, $self->_failed_queue,
@@ -845,13 +858,15 @@ sub handle_failed_items {
         my $n;
         if ( $action eq 'requeue' ) {
             $n += $self->__requeue(
-                source_queue            => $self->_failed_queue,
-                items                   => [$item],
-                place                   => 0,
-                error                   => $item_metadata{$item_key}{last_error},
-                # items in failed queue already have process_count=0.
-                # this ensures we don't count another attempt:
-                increment_process_count => 0
+                {
+                    error                   => $item_metadata{$item_key}{last_error},
+                    # Items in the failed queue already have process_count = 0.
+                    # This ensures we don't count another attempt:
+                    increment_process_count => 0,
+                    place                   => 0,
+                    source_queue            => $self->_failed_queue
+                },
+                $item
             );
         } elsif ( $action eq 'return' ) {
             $n = $rh->lrem( $self->_failed_queue, -1, $item_key );

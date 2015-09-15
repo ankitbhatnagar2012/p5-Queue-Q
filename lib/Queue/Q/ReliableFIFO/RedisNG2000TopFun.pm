@@ -716,9 +716,10 @@ sub get_item_age {
 
     my $rh = $self->redis_handle;
 
-    # take oldest item
-    my ($item_key) = $rh->lrange($subqueue_redis_key,-1,-1);
-    $item_key or return undef;
+    # Take the oldest item (and bail out if we can't find anything):
+    my @item_key = $rh->lrange($subqueue_redis_key, -1, -1);
+    @item_key
+        or return undef; # The queue is empty.
 
     my $time_created = $rh->hget("meta-$item_key" => 'time_created') || Time::HiRes::time();
     return Time::HiRes::time() - $time_created;

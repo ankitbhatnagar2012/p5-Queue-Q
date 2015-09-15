@@ -596,7 +596,7 @@ sub remove_failed_items {
             my $item_key = $item->{item_key};
             $rh->del("item-$item_key");
             $rh->del("meta-$item_key");
-            $#items_removed <= $loglimit
+            @items_removed < $loglimit
                 and push @items_removed, $item;
         } else {
             $rh->lpush($failed_queue, $item->{item_key});

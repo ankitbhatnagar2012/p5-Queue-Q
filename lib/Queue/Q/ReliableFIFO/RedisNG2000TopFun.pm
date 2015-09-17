@@ -129,13 +129,7 @@ sub new {
 sub enqueue_item {
     my $self = shift;
 
-    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY')
-        ? $_[0]
-        : \@_; # or should we copy it instead?
-
-    if ( grep { ref $_ } @$items ) {
-        die sprintf '%s->enqueue_item: encountered a reference; all payloads must be serialised in string format', __PACKAGE__;
-    }
+    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY') ? $_[0] : [ @_ ];
 
     grep { ref $_ } @$items
         and die sprintf(
@@ -334,9 +328,7 @@ sub _claim_item_internal {
 sub mark_item_as_processed {
     my $self = shift;
 
-    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY' )
-        ? $_[0]
-        : \@_; # or should we copy it instead?
+    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY' ) ? $_[0] : [ @_ ];
 
     my $rh = $self->redis_handle;
 

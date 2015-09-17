@@ -178,16 +178,6 @@ sub enqueue_item {
 ####################################################################################################
 ####################################################################################################
 
-sub claim_item {
-    my ($self, $n_items) = @_;
-    $self->_claim_item_internal($n_items, BLOCKING);
-}
-
-sub claim_item_nonblocking {
-    my ($self, $n_items) = @_;
-    $self->_claim_item_internal($n_items, NON_BLOCKING);
-}
-
 use constant {
     BLOCKING => 0,
     NON_BLOCKING => 1
@@ -311,6 +301,16 @@ sub _claim_item_internal {
         '%s->_claim_item_internal(): Unreachable code. This should never happen.',
         __PACKAGE__
     );
+}
+
+sub claim_item {
+    my ($self, $n_items) = @_;
+    $self->_claim_item_internal($n_items, BLOCKING);
+}
+
+sub claim_item_nonblocking {
+    my ($self, $n_items) = @_;
+    $self->_claim_item_internal($n_items, NON_BLOCKING);
 }
 
 ####################################################################################################
@@ -678,26 +678,23 @@ sub percent_memory_used {
 ####################################################################################################
 ####################################################################################################
 
-sub raw_items_unprocessed {
-    my $self = shift;
-    return $self->_raw_items('unprocessed', @_);
-}
-
-sub raw_items_working {
-    my $self = shift;
-    return $self->_raw_items('working', @_);
-}
-
-sub raw_items_failed {
-    my $self = shift;
-    return $self->_raw_items('failed', @_);
-}
-
 sub _raw_items {
     my ($self, $subqueue_name, $n) = @_;
 
     my $subqueue_redis_key = sprintf('%s_%s', $self->queue_name, $subqueue_name);
     my @item_keys = $self->redis_handle->lrange($subqueue_redis_key, -$n, -1);
+}
+
+sub raw_items_unprocessed {
+    shift->_raw_items('unprocessed', @_);
+}
+
+sub raw_items_working {
+    shift->_raw_items('working', @_);
+}
+
+sub raw_items_failed {
+    shift->_raw_items('failed', @_);
 }
 
 ####################################################################################################

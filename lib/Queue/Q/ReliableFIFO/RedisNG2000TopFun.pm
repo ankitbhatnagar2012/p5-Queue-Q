@@ -280,6 +280,11 @@ sub _claim_item_internal {
             # Yes, there is a race, but it's an optimization only.
             # This means that after we know how many items we have...
             my $llen = $rh->llen($unprocessed_queue);
+            # ... we only take those. But the point is that, between these two comments (err, maybe
+            #   the code statements are more important) there might have been an enqueue_item(), so
+            #   that we are actually grabbing less than what the user asked for. But we are OK with
+            #   that, since the new items are too fresh anyway (they might even be too hot for that
+            #   user's tongue).
             $n_items > $llen
                 and $n_items = $llen;
         }

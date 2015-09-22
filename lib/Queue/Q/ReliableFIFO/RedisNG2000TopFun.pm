@@ -718,24 +718,39 @@ sub queue_length {
 
 # This function returns the oldest item in the queue, or `undef` if the queue is empty.
 sub peek_item {
-    my ($self, $subqueue_name) = @_;
+    my ($self, $params) = @_;
 
-    my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
+    $params //= {};
+    ref $params eq 'HASH'
         or die sprintf(
-            q{%s->peek_item() couldn't find subqueue_accessor for subqueue_name=%s.},
-            __PACKAGE__, $subqueue_name
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, 'peek_item'
         );
 
+    my $direction = lc($params->{direction} // 'f');
+    $direction eq 'b' || $direction eq 'f'
+        or die sprintf(
+            q{%s->%s(): "direction" is either 'b' (back) or 'f' (front).},
+            __PACKAGE__, 'peek_item'
+        );
+    $direction = $direction eq 'f' ? -1 : 0;
+
+    my $subqueue_name = $params->{subqueue_name} // 'unprocessed';
+    my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
+        or die sprintf(
+            q{%s->%s() couldn't find subqueue_accessor for subqueue_name=%s.},
+            __PACKAGE__, 'peek_item', $subqueue_name
+        );
     my $subqueue_redis_key = $self->$subqueue_accessor_name
         or die sprintf(
-            q{%s->peek_item() couldn't map subqueue_name=%s to a Redis key.},
-            __PACKAGE__, $subqueue_name
+            q{%s->%s() couldn't map subqueue_name=%s to a Redis key.},
+            __PACKAGE__, 'peek_item', $subqueue_name
         );
 
     my $rh = $self->redis_handle;
 
-    # Take the oldest item (and bail out if we can't find anything):
-    my @item_key = $rh->lrange($subqueue_redis_key, -1, -1);
+    # Take the relevant item (and bail out if we can't find anything):
+    my @item_key = $rh->lrange($subqueue_redis_key, $direction, $direction);
     @item_key
         or return undef; # The queue is empty.
 

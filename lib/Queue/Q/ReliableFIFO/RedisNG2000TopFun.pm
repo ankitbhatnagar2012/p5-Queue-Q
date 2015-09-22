@@ -117,7 +117,8 @@ sub new {
         redis_conn => $self->redis_handle
     );
 
-    $self->redis_handle->select($params{db_id}) if $params{db_id};
+    $params{db_id}
+        and $self->redis_handle->select($params{db_id});
 
     return $self;
 }
@@ -259,7 +260,8 @@ sub _claim_item_internal {
         my @items;
 
         my $handler = sub {
-            return unless defined(my $item_key = $_[0]);
+            defined(my $item_key = $_[0])
+                or return;
 
             $rh->hincrby("meta-$item_key", process_count => 1, sub { });
             my %metadata = $rh->hgetall("meta-$item_key");

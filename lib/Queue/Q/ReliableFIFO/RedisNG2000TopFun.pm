@@ -447,89 +447,104 @@ sub mark_items_as_processed {
 ####################################################################################################
 
 sub unclaim {
-    my $self = shift;
+    my ($self, $params) = @_;
 
     return $self->__requeue(
+        $params,
         {
             caller                  => 'unclaim',
-            error                   => undef,
             increment_process_count => 0,
             place                   => 1,
             source_queue            => $self->_working_queue
-        },
-        @_
+        }
     );
 }
 
 sub requeue_busy {
-    my $self = shift;
+    my ($self, $params) = @_;
 
     return $self->__requeue(
+        $params,
         {
-            caller       => 'requeue_busy',
-            error        => '',
-            place        => 0,
-            source_queue => $self->_working_queue
-        },
-        @_
+            caller                  => 'requeue_busy',
+            increment_process_count => 1,
+            place                   => 0,
+            source_queue            => $self->_working_queue
+        }
     );
 }
 
 sub requeue_busy_error {
-    my $self  = shift;
-    my $error = shift;
+    my ($self, $params) = @_;
 
     return $self->__requeue(
+        $params,
         {
-            caller       => 'requeue_busy_error',
-            error        => $error,
-            place        => 0,
-            source_queue => $self->_working_queue,
-        },
-        @_
+            caller                  => 'requeue_busy_error',
+            increment_process_count => 1,
+            place                   => 0,
+            source_queue            => $self->_working_queue
+        }
     );
 }
 
 sub requeue_failed_items {
-    my $self = shift;
-    my $error = shift;
+    my ($self, $params) = @_;
 
     return $self->__requeue(
+        $params,
         {
-            caller       => 'requeue_failed_items',
-            error        => $error,
-            place        => 1,
-            source_queue => $self->_working_queue
-        },
-        @_
+            caller                  => 'requeue_failed_items',
+            increment_process_count => 1,
+            place                   => 1,
+            source_queue            => $self->_failed_queue
+        }
     );
 }
 
 sub __requeue  {
-    my $self = shift;
-    my $params = shift;
+    my ($self, $params, $config) = @_;
 
-    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY' ) ? $_[0] : [ @_ ];
-
-    my $source_queue = $params->{source_queue}
-        or die sprintf(q{%s->__requeue(): "source_queue" parameter is required.}, __PACKAGE__);
-
-    grep { not $_->isa('Queue::Q::ReliableFIFO::ItemNG2000TopFun') } @{ $items }
-        and die sprintf(
-            '%s->%s() only accepts objects of type %s or one of its subclasses.',
-            __PACKAGE__, $params->{caller}, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, $config->{caller}
         );
 
-    my $place = $params->{place} // 0;
-    my $error = $params->{error} // '';
-    my $increment_process_count = $params->{increment_process_count} // 1;
+    my $items = $params->{items} // [];
+    ref $items eq 'ARRAY'
+        or die sprintf(
+            q{%s->%s()'s "items" parameter has to be an array!},
+            __PACKAGE__, $config->{caller}
+        );
+
+    @$items
+        or die sprintf(
+            '%s->%s() expects at least one item!',
+            __PACKAGE__, $config->{caller}
+        );
+
+    my $source_queue = $config->{source_queue}
+        or die sprintf(q{%s->__requeue(): "source_queue" parameter is required.}, __PACKAGE__);
+
+    grep { not $_->isa('Queue::Q::ReliableFIFO::ItemNG2000TopFun') } @$items
+        and die sprintf(
+            '%s->%s() only accepts objects of type %s or one of its subclasses.',
+            __PACKAGE__, $config->{caller}, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
+        );
+
+    my $place = $config->{place};
+    my $error = $config->{error} // '';
+    my $increment_process_count = $config->{increment_process_count};
 
     my $items_requeued = 0;
 
     eval {
         foreach my $item (@$items) {
             $items_requeued += $self->_lua->call(
-                requeue => 3, # Requeue takes 3 keys, the source, ok-destination and fail-destination queues:
+                requeue => 3,
+                # Requeue takes 3 keys: The source, ok-destination and fail-destination queues:
                 $source_queue, $self->_unprocessed_queue, $self->_failed_queue,
                 $item->{item_key},
                 $self->requeue_limit,

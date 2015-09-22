@@ -882,22 +882,68 @@ sub percent_memory_used {
 ####################################################################################################
 
 sub _raw_items {
-    my ($self, $subqueue_name, $n) = @_;
+    my ($self, $params, $config) = @_;
 
-    my $subqueue_redis_key = sprintf('%s_%s', $self->queue_name, $subqueue_name);
-    my @item_keys = $self->redis_handle->lrange($subqueue_redis_key, -$n, -1);
+    my $n = $params->{number_of_items} || 0;
+    $n =~ m/^\d+$/
+        or die sprintf(
+            q{%s->%s(): "%s" must be a positive integer, or zero to signify all items.},
+            __PACKAGE__, $config->{caller}, 'number_of_items'
+        );
+
+    my $rh = $self->redis_handle;
+    my $subqueue_redis_key = sprintf('%s_%s', $self->queue_name, $config->{queue});
+    my @item_keys = $rh->lrange($subqueue_redis_key, -$n, -1);
+
+    my %items;
+    foreach my $item_key (@item_keys) {
+        $rh->get("item-$item_key", sub {
+            defined $_[0]
+                or die sprintf(
+                    q{%s->%s() found item_key=%s but not its key! This should never happen!!},
+                    __PACKAGE__, $config->{caller}, "item-$item_key"
+                );
+
+            $items{$item_key}->{payload} = $_[0];
+        });
+
+        $rh->hgetall("meta-$item_key", sub {
+            @_
+                or die sprintf(
+                    q{%s->%s() found item_key=%s but not its metadata! This should never happen!!},
+                    __PACKAGE__, $config->{caller}, "item-$item_key"
+                );
+
+            $items{$item_key}->{metadata} = { @{ $_[0] } };
+        });
+    }
+
+    $rh->wait_all_responses;
+
+    my @items;
+    foreach my $item_key (@item_keys) {
+        unshift @items, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+            item_key => $item_key,
+            payload  => $items{$item_key}->{payload},
+            metadata => $items{$item_key}->{metadata}
+        });
+    }
+    return \@items;
 }
 
 sub raw_items_unprocessed {
-    shift->_raw_items('unprocessed', @_);
+    my ($self, $params) = @_;
+    $self->_raw_items($params, { queue => 'unprocessed', caller => 'raw_items_unprocessed' });
 }
 
 sub raw_items_working {
-    shift->_raw_items('working', @_);
+    my ($self, $params) = @_;
+    $self->_raw_items($params, { queue => 'working', caller => 'raw_items_working' });
 }
 
 sub raw_items_failed {
-    shift->_raw_items('failed', @_);
+    my ($self, $params) = @_;
+    $self->_raw_items($params, { queue => 'failed', caller => 'raw_items_failed' });
 }
 
 ####################################################################################################

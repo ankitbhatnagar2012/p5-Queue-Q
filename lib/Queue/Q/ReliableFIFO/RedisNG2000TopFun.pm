@@ -259,7 +259,7 @@ sub _claim_item_internal {
                 warn sprintf '%s->_claim_item_internal: fetched empty payload for item_key=%s', __PACKAGE__, $item_key;
             }
 
-            push @items, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+            unshift @items, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
                 item_key => $item_key,
                 payload  => $payload,
                 metadata => \%metadata

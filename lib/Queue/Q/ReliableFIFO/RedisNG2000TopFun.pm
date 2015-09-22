@@ -271,7 +271,8 @@ sub _claim_item_internal {
         if ($n_items > 30) {
             # yes, there is a race, but it's an optimization only
             my ($llen) = $redis_handle->llen($unprocessed_queue);
-            $n_items = $llen if $llen < $n_items;
+            $n_items > $llen
+                and $n_items = $llen;
         }
 
         eval {
@@ -707,13 +708,11 @@ sub handle_expired_items {
             metadata => $item_metadata{$item_key}
         );
 
-        my $n;
-        if ( $action eq 'requeue' ) {
-            $n = $self->requeue_busy($item);
-        }
-        elsif ( $action eq 'drop' ) {
-            $n = $r->lrem( $self->_working_queue, -1, $item_key);
-        }
+        my $n = $action eq 'requeue'           ?
+                    $self->requeue_busy($item) :
+                $action eq 'drop'                                   ?
+                    $rh->lrem($self->_working_queue, -1, $item_key) :
+                    undef;
 
         $n and push @expired_items, $item;
     }

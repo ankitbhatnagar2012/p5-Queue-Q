@@ -624,6 +624,58 @@ sub process_failed_items {
     return ($item_count, $error_count);
 }
 
+sub handle_failed_items {
+    my ($self, $action) = @_;
+
+    $action && ( $action eq 'requeue' || $action eq 'return' )
+        or die sprintf(
+            '%s->handle_failed_items(): Unknown action (%s)!',
+            __PACKAGE__, $action // 'undefined'
+        );
+
+    my $rh = $self->redis_handle;
+
+    my @item_keys = $rh->lrange($self->_failed_queue, 0, -1);
+
+    my ( %item_metadata, @failed_items );
+
+    foreach my $item_key (@item_keys) {
+        $rh->hgetall("meta-$item_key" => sub {
+            $item_metadata{$item_key} = { @_ };
+        });
+    }
+
+    $rh->wait_all_responses;
+
+    for my $item_key (@item_keys) {
+        my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new(
+            item_key => $item_key,
+            metadata => $item_metadata{$item_key}
+        );
+
+        my $n;
+        if ( $action eq 'requeue' ) {
+            $n += $self->__requeue(
+                {
+                    error                   => $item_metadata{$item_key}{last_error},
+                    # Items in the failed queue already have process_count = 0.
+                    # This ensures we don't count another attempt:
+                    increment_process_count => 0,
+                    place                   => 0,
+                    source_queue            => $self->_failed_queue
+                },
+                $item
+            );
+        } elsif ( $action eq 'return' ) {
+            $n = $rh->lrem( $self->_failed_queue, -1, $item_key );
+        }
+
+        $n and push @failed_items, $item;
+    }
+
+    return \@failed_items;
+}
+
 sub remove_failed_items {
     my ($self, %options) = @_;
 
@@ -903,61 +955,6 @@ sub handle_expired_items {
     }
 
     return \@expired_items;
-}
-
-####################################################################################################
-####################################################################################################
-
-sub handle_failed_items {
-    my ($self, $action) = @_;
-
-    $action && ( $action eq 'requeue' || $action eq 'return' )
-        or die sprintf(
-            '%s->handle_failed_items(): Unknown action (%s)!',
-            __PACKAGE__, $action // 'undefined'
-        );
-
-    my $rh = $self->redis_handle;
-
-    my @item_keys = $rh->lrange($self->_failed_queue, 0, -1);
-
-    my ( %item_metadata, @failed_items );
-
-    foreach my $item_key (@item_keys) {
-        $rh->hgetall("meta-$item_key" => sub {
-            $item_metadata{$item_key} = { @_ };
-        });
-    }
-
-    $rh->wait_all_responses;
-
-    for my $item_key (@item_keys) {
-        my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new(
-            item_key => $item_key,
-            metadata => $item_metadata{$item_key}
-        );
-
-        my $n;
-        if ( $action eq 'requeue' ) {
-            $n += $self->__requeue(
-                {
-                    error                   => $item_metadata{$item_key}{last_error},
-                    # Items in the failed queue already have process_count = 0.
-                    # This ensures we don't count another attempt:
-                    increment_process_count => 0,
-                    place                   => 0,
-                    source_queue            => $self->_failed_queue
-                },
-                $item
-            );
-        } elsif ( $action eq 'return' ) {
-            $n = $rh->lrem( $self->_failed_queue, -1, $item_key );
-        }
-
-        $n and push @failed_items, $item;
-    }
-
-    return \@failed_items;
 }
 
 ####################################################################################################

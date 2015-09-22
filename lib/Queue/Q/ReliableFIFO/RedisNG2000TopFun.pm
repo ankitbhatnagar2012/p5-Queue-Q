@@ -283,7 +283,7 @@ sub _claim_item_internal {
 
                 if (defined $first_item) {
                     $handler->($first_item);
-                    $redis_handle->rpoplpush($unprocessed_queue, $working_queue, $handler) for 1 .. ($n_items-1);
+                    $redis_handle->rpoplpush($unprocessed_queue, $working_queue, $handler) for 2 .. $n_items;
                     $redis_handle->wait_all_responses;
                 }
             }

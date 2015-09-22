@@ -768,9 +768,7 @@ sub handle_expired_items {
             __PACKAGE__
         );
 
-    my %valid_actions = map { $_ => 1 } qw/requeue drop/;
-
-    $action && $valid_actions{$action}
+    $action && ( $action eq 'requeue' || $action eq 'drop' )
         or die sprintf(
             '%s->handle_expired_items(): Unknown action (%s)!',
             __PACKAGE__, $action // 'undefined'
@@ -819,9 +817,7 @@ sub handle_expired_items {
 sub handle_failed_items {
     my ($self, $action) = @_;
 
-    my %valid_actions = map { $_ => 1 } qw/requeue return/;
-
-    $action && $valid_actions{$action}
+    $action && ( $action eq 'requeue' || $action eq 'return' )
         or die sprintf(
             '%s->handle_failed_items(): Unknown action (%s)!',
             __PACKAGE__, $action // 'undefined'

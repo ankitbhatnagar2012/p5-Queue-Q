@@ -122,9 +122,15 @@ sub enqueue_item {
 
     my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY') ? $_[0] : [ @_ ];
 
-    grep { ref $_ } @$items
+    @$items
+        or die sprintf(
+            '%s->enqueue_item() expects at least one item to enqueue!',
+            __PACKAGE__
+        );
+
+    grep { ref $_ || not defined $_ } @$items
         and die sprintf(
-            '%s->enqueue_item() encountered a reference. All payloads must be strings!',
+            '%s->enqueue_item(): All payloads must be strings!',
             __PACKAGE__
         );
 
@@ -186,14 +192,23 @@ use constant {
 sub _claim_item_internal {
     my ($self, $n_items, $do_blocking) = @_;
 
+    if (defined $n_items) {
+        $n_items =~ m/^\d+$/ && $n_items
+            or die sprintf(
+                '%s->claim_item(): The number of items must be a positive integer!',
+                __PACKAGE__
+            );
+    } else {
+        $n_items = 1;
+    }
+
     my $timeout           = $self->claim_wait_timeout;
     my $rh                = $self->redis_handle;
     my $unprocessed_queue = $self->_unprocessed_queue;
     my $working_queue     = $self->_working_queue;
 
-    unless ( defined $n_items and $n_items > 0 ) {
-        $n_items = 1;
-    }
+    defined $n_items && $n_items > 0
+        or $n_items = 1;
 
     if ( $n_items == 1 ) {
         if ( $do_blocking == NON_BLOCKING ) {
@@ -321,6 +336,18 @@ sub mark_item_as_processed {
 
     my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY' ) ? $_[0] : [ @_ ];
 
+    @$items
+        or die sprintf(
+            '%s->mark_item_as_processed() expects at least one item to mark as processed!',
+            __PACKAGE__
+        );
+
+    grep { not $_->isa('Queue::Q::ReliableFIFO::ItemNG2000TopFun') } @{ $items }
+        and die sprintf(
+            '%s->mark_item_as_processed() only accepts objects of type %s or one of its subclasses.',
+            __PACKAGE__, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
+        );
+
     my $rh = $self->redis_handle;
 
     my %result = (
@@ -430,12 +457,20 @@ sub requeue_failed_items {
 sub __requeue  {
     my ($self, $params) = @_;
 
-    my $place = $params->{place} // 0;
-    my $error = $params->{error} // '';
-    my $increment_process_count = $params->{increment_process_count} // 1;
+    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY' ) ? $_[0] : [ @_ ];
 
     my $source_queue = $params->{source_queue}
         or die sprintf(q{%s->__requeue(): "source_queue" parameter is required.}, __PACKAGE__);
+
+    grep { not $_->isa('Queue::Q::ReliableFIFO::ItemNG2000TopFun') } @{ $items }
+        and die sprintf(
+            '%s->%s() only accepts objects of type %s or one of its subclasses.',
+            __PACKAGE__, $params->{caller}, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
+        );
+
+    my $place = $params->{place} // 0;
+    my $error = $params->{error} // '';
+    my $increment_process_count = $params->{increment_process_count} // 1;
 
     my $items_requeued = 0;
 
@@ -468,6 +503,18 @@ sub __requeue  {
 
 sub process_failed_items {
     my ($self, $max_count, $callback) = @_;
+
+    defined $max_count && $max_count !~ m/^\d+$/
+        and die sprintf(
+            '%s->process_failed_items(): "$max_count" must be a positive integer!',
+            __PACKAGE__
+        );
+
+    ref $callback eq 'CODE'
+        or die sprintf(
+            '%s->process_failed_items(): "$callback" must be a code reference!',
+            __PACKAGE__
+        );
 
     my $temp_table = 'temp-failed-' . $UUID->create_hex(); # Include queue_name too?
     my $rh = $self->redis_handle;
@@ -517,7 +564,8 @@ sub remove_failed_items {
     my $min_fc   = delete $options{MinFailCount} || 0;
     my $chunk    = delete $options{Chunk}        || 100;
     my $loglimit = delete $options{LogLimit}     || 100;
-    cluck("Invalid option: $_") for (keys %options);
+    cluck(__PACKAGE__ . qq{->remove_failed_items(): Invalid option "$_"!})
+        for keys %options;
 
     my $now = Time::HiRes::time;
     my $tc_min = $now - $min_age;
@@ -576,7 +624,11 @@ sub queue_length {
             __PACKAGE__, $subqueue_name
         );
 
-    my $subqueue_redis_key = $self->$subqueue_accessor_name;
+    my $subqueue_redis_key = $self->$subqueue_accessor_name
+        or die sprintf(
+            q{%s->queue_length() couldn't map subqueue_name=%s to a Redis key.},
+            __PACKAGE__, $subqueue_name
+        );
 
     my ($llen) = $self->redis_handle->llen($subqueue_redis_key);
     return $llen;
@@ -634,16 +686,21 @@ sub peek_item {
 ####################################################################################################
 ####################################################################################################
 
-sub age {
+sub get_item_age {
     my ($self, $subqueue_name) = @_;
 
     my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
         or die sprintf(
-            q{%s->age() couldn't find subqueue_accessor for subqueue_name=%s.},
+            q{%s->get_item_age() couldn't find subqueue_accessor for subqueue_name=%s.},
             __PACKAGE__, $subqueue_name
         );
 
-    my $subqueue_redis_key = $self->$subqueue_accessor_name;
+    my $subqueue_redis_key = $self->$subqueue_accessor_name
+        or die sprintf(
+            q{%s->get_item_age() couldn't map subqueue_name=%s to a Redis key.},
+            __PACKAGE__, $subqueue_name
+        );
+
     my $rh = $self->redis_handle;
 
     # take oldest item
@@ -658,7 +715,7 @@ sub age {
 ####################################################################################################
 
 sub percent_memory_used {
-    my ($self) = @_;
+    my $self = shift;
 
     my $rh = $self->redis_handle;
 
@@ -707,7 +764,7 @@ sub handle_expired_items {
 
     int($timeout)
         or die sprintf(
-            q{%s->handle_expired_items(): "$timeout" must be a positive number.},
+            q{%s->handle_expired_items(): "$timeout" must be a positive integer!},
             __PACKAGE__
         );
 

@@ -13,11 +13,6 @@ use Time::HiRes qw//;
 use Queue::Q::ReliableFIFO::Lua;
 use Queue::Q::ReliableFIFO::ItemNG2000TopFun;
 
-use constant {
-    CLAIM_NONBLOCKING => 0,
-    CLAIM_BLOCKING => 1
-};
-
 our ( %VALID_SUBQUEUES, %VALID_PARAMS );
 
 BEGIN {
@@ -186,13 +181,18 @@ sub enqueue_item {
 
 sub claim_item {
     my ($self, $n_items) = @_;
-    $self->_claim_item_internal($n_items, CLAIM_BLOCKING);
+    $self->_claim_item_internal($n_items, BLOCKING);
 }
 
 sub claim_item_nonblocking {
     my ($self, $n_items) = @_;
-    $self->_claim_item_internal($n_items, CLAIM_NONBLOCKING);
+    $self->_claim_item_internal($n_items, NON_BLOCKING);
 }
+
+use constant {
+    BLOCKING => 0,
+    NON_BLOCKING => 1
+};
 
 sub _claim_item_internal {
     my ($self, $n_items, $do_blocking) = @_;
@@ -207,7 +207,7 @@ sub _claim_item_internal {
     }
 
     if ( $n_items == 1 ) {
-        if ( $do_blocking == CLAIM_NONBLOCKING ) {
+        if ( $do_blocking == NON_BLOCKING ) {
             return unless my $item_key = $redis_handle->rpoplpush($self->_unprocessed_queue, $self->_working_queue);
 
             $redis_handle->hincrby("meta-$item_key", process_count => 1, sub { });
@@ -220,7 +220,7 @@ sub _claim_item_internal {
                 payload  => $payload,
                 metadata => \%metadata
             });
-        } else { # $do_blocking == CLAIM_BLOCKING
+        } else { # $do_blocking == BLOCKING
             my $item_key = $redis_handle->rpoplpush($self->_unprocessed_queue, $self->_working_queue)
                    || $redis_handle->brpoplpush($self->_unprocessed_queue, $self->_working_queue, $self->claim_wait_timeout);
 

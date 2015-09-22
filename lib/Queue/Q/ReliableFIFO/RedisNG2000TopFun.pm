@@ -57,17 +57,24 @@ my $UUID = Data::UUID::MT->new( version => '4s' );
 ####################################################################################################
 
 sub new {
-    my ($class, %params) = @_;
+    my ($class, $params) = @_;
+
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->new() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__
+        );
 
     foreach my $required_param (qw/server port queue_name/) {
-        $params{$required_param}
+        $params->{$required_param}
             or die sprintf(
                 q{%s->new(): Missing mandatory parameter "%s".},
                 __PACKAGE__, $required_param
             );
     }
 
-    foreach my $provided_param (keys %params) {
+    foreach my $provided_param (keys %$params) {
         $VALID_PARAMS{$provided_param}
             or die sprintf(
                 q{%s->new() encountered an unknown parameter "%s".},
@@ -81,24 +88,24 @@ sub new {
         claim_wait_timeout => 1,
         db_id              => 0,
         warn_on_requeue    => 0,
-        %params
+        %$params
     } => $class);
 
     my %default_redis_options = (
         reconnect => 60,
         encoding  => undef, # force undef for binary data
-        server    => join(':' => $params{server}, $params{port})
+        server    => join(':' => $params->{server}, $params->{port})
     );
 
     # populate subqueue attributes with name of redis list
     # e.g. unprocessed -> _unprocessed_queue (accessor name) -> foo_unprocessed (redis list name)
     foreach my $subqueue_name ( keys %VALID_SUBQUEUES ) {
         my $accessor_name = $VALID_SUBQUEUES{$subqueue_name};
-        my $redis_list_name = sprintf('%s_%s', $params{queue_name}, $subqueue_name);
+        my $redis_list_name = sprintf('%s_%s', $params->{queue_name}, $subqueue_name);
         $self->{$accessor_name} = $redis_list_name;
     }
 
-    my %redis_options = %{ $params{redis_options} || {} };
+    my %redis_options = %{ $params->{redis_options} || {} };
 
     $self->{redis_handle} //= Redis->new(
         %default_redis_options, %redis_options
@@ -108,8 +115,8 @@ sub new {
         redis_conn => $self->redis_handle
     );
 
-    $params{db_id}
-        and $self->redis_handle->select($params{db_id});
+    $params->{db_id}
+        and $self->redis_handle->select($params->{db_id});
 
     return $self;
 }

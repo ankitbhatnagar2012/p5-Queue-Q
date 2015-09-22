@@ -425,7 +425,7 @@ sub mark_items_as_processed {
                     splice @to_purge, 0, 100;
 
         my $deleted = 0;
-        $rh->del(@chunk, sub { $deleted += $_[0] ? $_[0] : 0 });
+        $rh->del(@chunk, sub { $deleted += $_[0] });
         $rh->wait_all_responses();
         $deleted == @chunk
             or warn sprintf(

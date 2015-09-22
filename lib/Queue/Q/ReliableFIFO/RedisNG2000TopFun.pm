@@ -142,7 +142,12 @@ sub enqueue_item {
         my $item_key = sprintf '%s-%s', $self->queue_name, $item_id;
 
         # create payload item
-        my $setnx_success = $redis_handle->setnx("item-$item_key" => $input_item);
+        $redis_handle->setnx("item-$item_key" => $input_item)
+            or die sprintf(
+                '%s->enqueue_item failed to setnx() data for item_key=%s. This means the key alre' .
+                'ady existed, which is highly improbable.',
+                __PACKAGE__, $item_key
+            );
 
         my $now = Time::HiRes::time;
 
@@ -153,8 +158,11 @@ sub enqueue_item {
             time_enqueued => $now,
         );
 
-        # create metadata
-        my $hmset_success = $redis_handle->hmset( "meta-$item_key" => %metadata );
+        # Create metadata. This call will just die if not successful (in the rare event of having
+        #   a key with the same name in Redis that doesn't have a hash stored. If it does have one
+        #   that indeed has a hash stored (highly unlikely), we are really unfortunate (that is a
+        #   silent failure).
+        $redis_handle->hmset("meta-$item_key" => %metadata);
 
         # enqueue item
         unless ( $redis_handle->lpush( $self->_unprocessed_queue, $item_key ) ) {

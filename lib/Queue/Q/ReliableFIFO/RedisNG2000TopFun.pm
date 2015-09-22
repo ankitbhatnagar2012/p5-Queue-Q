@@ -208,29 +208,32 @@ use constant {
     NON_BLOCKING => 1
 };
 
-sub _claim_item_internal {
-    my ($self, $n_items, $do_blocking) = @_;
+sub _claim_items_internal {
+    my ($self, $params, $config) = @_;
 
-    if (defined $n_items) {
-        $n_items =~ m/^\d+$/ && $n_items
-            or die sprintf(
-                '%s->claim_item(): The number of items must be a positive integer!',
-                __PACKAGE__
-            );
-    } else {
-        $n_items = 1;
-    }
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, $config->{caller}
+        );
+
+    my $n_items = $params->{number_of_items} // 1;
+    $n_items =~ m/^\d+$/ && $n_items
+        or die sprintf(
+            q{%s->%s()'s "number_of_items" parameter has to be a positive integer!},
+            __PACKAGE__, $config->{caller}
+        );
+
+    my $mode = $config->{blocking_mode};
 
     my $timeout           = $self->claim_wait_timeout;
     my $rh                = $self->redis_handle;
     my $unprocessed_queue = $self->_unprocessed_queue;
     my $working_queue     = $self->_working_queue;
 
-    defined $n_items && $n_items > 0
-        or $n_items = 1;
-
     if ( $n_items == 1 ) {
-        if ( $do_blocking == NON_BLOCKING ) {
+        if ( $mode == NON_BLOCKING ) {
             my $item_key = $rh->rpoplpush($self->_unprocessed_queue, $self->_working_queue)
                 or return;
 
@@ -244,7 +247,7 @@ sub _claim_item_internal {
                 payload  => $payload,
                 metadata => \%metadata
             });
-        } else { # $do_blocking == BLOCKING
+        } else { # $mode == BLOCKING
             my $w_queue = $self->_working_queue;
             my $u_queue = $self->_unprocessed_queue;
             my $item_key = $rh->rpoplpush($u_queue, $w_queue) || $rh->brpoplpush($u_queue, $w_queue, $self->claim_wait_timeout)
@@ -278,13 +281,13 @@ sub _claim_item_internal {
 
             keys %metadata
                 or warn sprintf(
-                    '%s->_claim_item_internal() fetched empty metadata for item_key=%s!',
+                    '%s->_claim_items_internal() fetched empty metadata for item_key=%s!',
                     __PACKAGE__, $item_key
                 );
 
             defined $payload
                 or warn sprintf(
-                    '%s->_claim_item_internal() fetched undefined payload for item_key=%s!',
+                    '%s->_claim_items_internal() fetched undefined payload for item_key=%s!',
                     __PACKAGE__, $item_key
                 );
 
@@ -313,7 +316,7 @@ sub _claim_item_internal {
                 for 1 .. $n_items;
             $rh->wait_all_responses;
 
-            if ( @items == 0 && $do_blocking ) {
+            if (@items == 0 && $mode == BLOCKING) {
                 my $first_item = $rh->brpoplpush($unprocessed_queue, $working_queue, $timeout);
 
                 if (defined $first_item) {
@@ -328,7 +331,7 @@ sub _claim_item_internal {
         } or do {
             my $eval_error = $@ || 'zombie error';
             warn sprintf(
-                '%s->_claim_item_internal() encountered an exception while claiming bulk items: %s',
+                '%s->_claim_items_internal() encountered an exception while claiming bulk items: %s',
                 __PACKAGE__, $eval_error
             );
         };
@@ -337,19 +340,25 @@ sub _claim_item_internal {
     }
 
     die sprintf(
-        '%s->_claim_item_internal(): Unreachable code. This should never happen.',
+        '%s->_claim_items_internal(): Unreachable code. This should never happen.',
         __PACKAGE__
     );
 }
 
-sub claim_item {
-    my ($self, $n_items) = @_;
-    $self->_claim_item_internal($n_items, BLOCKING);
+sub claim_items {
+    my ($self, $params) = @_;
+    $self->_claim_items_internal(
+        $params,
+        { blocking_mode => BLOCKING, caller => 'claim_items' }
+    );
 }
 
-sub claim_item_nonblocking {
-    my ($self, $n_items) = @_;
-    $self->_claim_item_internal($n_items, NON_BLOCKING);
+sub claim_items_nonblocking {
+    my ($self, $params) = @_;
+    $self->_claim_items_internal(
+        $params,
+        { blocking_mode => NON_BLOCKING, caller => 'claim_items_nonblocking' }
+    );
 }
 
 ####################################################################################################

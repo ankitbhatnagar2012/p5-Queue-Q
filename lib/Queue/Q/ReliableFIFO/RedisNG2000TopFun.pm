@@ -674,9 +674,21 @@ sub remove_failed_items {
 sub flush_queue {
     my $self = shift;
     my $rh = $self->redis_handle;
-    $rh->multi;
-    $rh->del($_) for values %VALID_SUBQUEUES;
-    $rh->exec;
+    my ($item_key, $queue_name);
+
+    for my $queue (values %VALID_SUBQUEUES) {
+        $queue_name = $self->$queue;
+        $rh->lrange($queue_name, 0, -1, sub {
+            for $item_key (@{ $_[0] }) {
+                $rh->del("item-$item_key", sub {});
+                $rh->del("meta-$item_key", sub {});
+            }
+        });
+        $rh->del($queue_name, sub {});
+    }
+
+    $rh->wait_all_responses();
+
     return;
 }
 

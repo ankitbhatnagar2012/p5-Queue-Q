@@ -70,12 +70,18 @@ sub new {
 
     foreach my $required_param (qw/server port queue_name/) {
         $params{$required_param}
-            or croak __PACKAGE__ . qq{->new(): Missing mandatory parameter "$required_param".};
+            or die sprintf(
+                q{%s->new(): Missing mandatory parameter "%s".},
+                __PACKAGE__, $required_param
+            );
     }
 
     foreach my $provided_param (keys %params) {
         $VALID_PARAMS{$provided_param}
-            or croak __PACKAGE__ . qq{->new() encountered an unknown parameter "$provided_param".};
+            or die sprintf(
+                q{%s->new() encountered an unknown parameter "%s".},
+                __PACKAGE__, $provided_param
+            );
     }
 
     my $self = bless({
@@ -97,7 +103,7 @@ sub new {
     # e.g. unprocessed -> _unprocessed_queue (accessor name) -> foo_unprocessed (redis list name)
     foreach my $subqueue_name ( keys %VALID_SUBQUEUES ) {
         my $accessor_name = $VALID_SUBQUEUES{$subqueue_name};
-        my $redis_list_name = sprintf '%s_%s', $params{queue_name}, $subqueue_name;
+        my $redis_list_name = sprintf('%s_%s', $params{queue_name}, $subqueue_name);
         $self->{$accessor_name} = $redis_list_name;
     }
 
@@ -130,19 +136,23 @@ sub enqueue_item {
         die sprintf '%s->enqueue_item: encountered a reference; all payloads must be serialised in string format', __PACKAGE__;
     }
 
-    my $redis_handle = $self->redis_handle ;
+    grep { ref $_ } @$items
+        and die sprintf(
+            '%s->enqueue_item() encountered a reference. All payloads must be strings!',
+            __PACKAGE__
+        );
 
     my @created;
 
     foreach my $input_item (@$items) {
         my $item_id  = $UUID->create_hex();
-        my $item_key = sprintf '%s-%s', $self->queue_name, $item_id;
+        my $item_key = sprintf('%s-%s', $self->queue_name, $item_id);
 
         # Create the payload item.
         $redis_handle->setnx("item-$item_key" => $input_item)
             or die sprintf(
-                '%s->enqueue_item failed to setnx() data for item_key=%s. This means the key alre' .
-                'ady existed, which is highly improbable.',
+                '%s->enqueue_item() failed to setnx() data for item_key=%s. This means the key ' .
+                'already existed, which is highly improbable.',
                 __PACKAGE__, $item_key
             );
 
@@ -161,10 +171,12 @@ sub enqueue_item {
         #   silent failure).
         $redis_handle->hmset("meta-$item_key" => %metadata);
 
-        # enqueue item
-        unless ( $redis_handle->lpush($self->_unprocessed_queue, $item_key) ) {
-            die sprintf '%s->enqueue_item failed to lpush item_key=%s onto unprocessed queue %s', __PACKAGE__, $item_key, $self->_unprocessed_queue;
-        }
+        # Enqueue the actual item.
+        $rh->lpush($self->_unprocessed_queue, $item_key)
+            or die sprintf(
+                '%s->enqueue_item() failed to lpush() item_key=%s onto the unprocessed queue (%s).',
+                __PACKAGE__, $item_key, $self->_unprocessed_queue
+            );
 
         push @created, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
             item_key => $item_key,
@@ -252,12 +264,17 @@ sub _claim_item_internal {
             my %metadata = $redis_handle->hgetall("meta-$item_key");
             my $payload  = $redis_handle->get("item-$item_key");
 
-            unless ( keys %metadata ) {
-                warn sprintf '%s->_claim_item_internal: fetched empty metadata for item_key=%s', __PACKAGE__, $item_key;
-            }
-            unless ( defined $payload ) {
-                warn sprintf '%s->_claim_item_internal: fetched empty payload for item_key=%s', __PACKAGE__, $item_key;
-            }
+            keys %metadata
+                or warn sprintf(
+                    '%s->_claim_item_internal() fetched empty metadata for item_key=%s!',
+                    __PACKAGE__, $item_key
+                );
+
+            defined $payload
+                or warn sprintf(
+                    '%s->_claim_item_internal() fetched undefined payload for item_key=%s!',
+                    __PACKAGE__, $item_key
+                );
 
             unshift @items, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
                 item_key => $item_key,
@@ -290,13 +307,19 @@ sub _claim_item_internal {
             1;
         } or do {
             my $eval_error = $@ || 'zombie error';
-            warn sprintf '%s->_claim_item_internal encountered an exception while claiming bulk items: %s', __PACKAGE__, $eval_error;
+            warn sprintf(
+                '%s->_claim_item_internal() encountered an exception while claiming bulk items: %s',
+                __PACKAGE__, $eval_error
+            );
         };
 
         return @items;
     }
 
-    die sprintf '%s->_claim_item_internal: how did we end up here?', __PACKAGE__;
+    die sprintf(
+        '%s->_claim_item_internal(): Unreachable code. This should never happen.',
+        __PACKAGE__
+    );
 }
 
 ####################################################################################################
@@ -352,11 +375,11 @@ sub mark_item_as_processed {
         $deleted != @chunk and warn sprintf '%s->mark_item_as_processed: could not remove some meta or item keys', __PACKAGE__;
     }
 
-    # $redis_handle->wait_all_responses();
-
-    if (@$failed) {
-        warn sprintf '%s->mark_item_as_processed: %d/%d items were not removed from working_queue=%s', __PACKAGE__, int(@$failed), int(@$flushed+@$failed), $self->_working_queue;
-    }
+    @$failed
+        and warn sprintf(
+            '%s->mark_item_as_processed(): %d/%d items were not removed from the working queue (%s)!',
+            __PACKAGE__, int(@$failed), int(@$flushed + @$failed), $self->_working_queue
+        );
 
     return \%result;
 }
@@ -419,7 +442,7 @@ sub __requeue  {
     my $increment_process_count = $params->{increment_process_count} // 1;
 
     my $source_queue = $params->{source_queue}
-    or die sprintf q{%s->__requeue: missing source_queue param}, __PACKAGE__;
+        or die sprintf(q{%s->__requeue(): "source_queue" parameter is required.}, __PACKAGE__);
 
     my $items_requeued = 0;
 
@@ -438,7 +461,10 @@ sub __requeue  {
         1;
     } or do {
         my $eval_error = $@ || 'zombie lua error';
-        cluck("Lua call went wrong: $eval_error");
+        warn sprintf(
+            '%s->%s(): Lua call went wrong => %s',
+            __PACKAGE__, $internal->{caller}, $eval_error
+        );
     };
 
     return $items_requeued;
@@ -453,8 +479,12 @@ sub process_failed_items {
     my $temp_table = 'temp-failed-' . $UUID->create_hex(); # Include queue_name too?
     my $redis_handle = $self->redis_handle;
 
-    $redis_handle->renamenx($self->_failed_queue, $temp_table)
-        or die 'Cosmic ray detected';
+    $rh->renamenx($self->_failed_queue, $temp_table)
+        or die sprintf(
+            '%s->process_failed_items() failed to renamenx() the failed queue (%s). This means' .
+            ' that the key already existed, which is highly improbable.',
+            __PACKAGE__, $self->_failed_queue
+        );
 
     my $error_count;
     my @item_keys = $redis_handle->lrange($temp_table, 0, $max_count ? $max_count : -1 );
@@ -520,8 +550,11 @@ sub remove_failed_items {
         return 1; # success
     });
 
-    warn "Encountered $error_count errors while removing $item_count failed items"
-        if $error_count;
+    $error_count
+        and warn sprintf(
+            '%s->remove_failed_items() encountered %d errors while removing %d failed items!',
+            __PACKAGE__, $error_count, $item_count
+        );
 
     return ($item_count, \@items_removed);
 }
@@ -545,7 +578,10 @@ sub queue_length {
     my ($self, $subqueue_name) = @_;
 
     my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
-    or die sprintf(q{couldn't find subqueue_accessor for subqueue_name=%s}, $subqueue_name);
+        or die sprintf(
+            q{%s->queue_length() couldn't find subqueue_accessor for subqueue_name=%s.},
+            __PACKAGE__, $subqueue_name
+        );
 
     my $subqueue_redis_key = $self->$subqueue_accessor_name;
 
@@ -561,12 +597,16 @@ sub peek_item {
     my ($self, $subqueue_name) = @_;
 
     my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
-    or die sprintf(q{couldn't find subqueue_accessor for subqueue_name=%s}, $subqueue_name);
+        or die sprintf(
+            q{%s->peek_item() couldn't find subqueue_accessor for subqueue_name=%s.},
+            __PACKAGE__, $subqueue_name
+        );
 
-    my $subqueue_redis_key;
-    unless ( $subqueue_redis_key = $self->$subqueue_accessor_name ) {
-        die sprintf "couldn't map subqueue_name=%s to a redis key", $subqueue_name;
-    }
+    my $subqueue_redis_key = $self->$subqueue_accessor_name
+        or die sprintf(
+            q{%s->peek_item() couldn't map subqueue_name=%s to a Redis key.},
+            __PACKAGE__, $subqueue_name
+        );
 
     my $redis_handle = $self->redis_handle;
 
@@ -605,7 +645,10 @@ sub age {
     my ($self, $subqueue_name) = @_;
 
     my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
-    or die sprintf(q{couldn't find subqueue_accessor for subqueue_name=%s}, $subqueue_name);
+        or die sprintf(
+            q{%s->age() couldn't find subqueue_accessor for subqueue_name=%s.},
+            __PACKAGE__, $subqueue_name
+        );
 
     my $subqueue_redis_key = $self->$subqueue_accessor_name;
     my $redis_handle = $self->redis_handle;
@@ -629,7 +672,10 @@ sub percent_memory_used {
     my (undef, $mem_avail) = $r->config('get', 'maxmemory');
 
     if ($mem_avail == 0) {
-        warn sprintf "%s->percent_memory_used: maxmemory is set to 0, can't derive a percentage";
+        warn sprintf(
+            q{%s->percent_memory_used(): "maxmemory" is set to 0, can't derive a percentage.},
+            __PACKAGE__
+        );
         return undef;
     }
 
@@ -660,7 +706,7 @@ sub raw_items_failed {
 sub _raw_items {
     my ($self, $subqueue_name, $n) = @_;
 
-    my $subqueue_redis_key = sprintf '%s_%s', $self->queue_name, $subqueue_name;
+    my $subqueue_redis_key = sprintf('%s_%s', $self->queue_name, $subqueue_name);
     my @item_keys = $self->redis_handle->lrange($subqueue_redis_key, -$n, -1);
 }
 
@@ -672,13 +718,19 @@ sub handle_expired_items {
 
     $timeout ||= $self->busy_expiry_time;
 
-    die "timeout should be a number> 0" if not int($timeout);
+    int($timeout)
+        or die sprintf(
+            q{%s->handle_expired_items(): "$timeout" must be a positive number.},
+            __PACKAGE__
+        );
 
     my %valid_actions = map { $_ => 1 } qw/requeue drop/;
 
-    unless ( $action and $valid_actions{$action} ) {
-        die sprintf '%s->handle_expired_items: unknown action %s', __PACKAGE__, $action;
-    }
+    $action && $valid_actions{$action}
+        or die sprintf(
+            '%s->handle_expired_items(): Unknown action (%s)!',
+            __PACKAGE__, $action // 'undefined'
+        );
 
     my $r = $self->redis_handle;
 
@@ -725,9 +777,11 @@ sub handle_failed_items {
 
     my %valid_actions = map { $_ => 1 } qw/requeue return/;
 
-    unless ( $action and $valid_actions{$action} ) {
-        die sprintf '%s->handle_failed_items: unknown action %s', __PACKAGE__, $action;
-    }
+    $action && $valid_actions{$action}
+        or die sprintf(
+            '%s->handle_failed_items(): Unknown action (%s)!',
+            __PACKAGE__, $action // 'undefined'
+        );
 
     my $r = $self->redis_handle;
 
@@ -774,7 +828,6 @@ sub handle_failed_items {
 ####################################################################################################
 
 # Legacy method names
-
 {
     no warnings 'once';
     *mark_item_as_done   = \&mark_item_as_processed;

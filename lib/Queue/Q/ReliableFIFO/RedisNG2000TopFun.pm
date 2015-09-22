@@ -556,7 +556,7 @@ sub queue_length {
 ################################################################################
 ################################################################################
 
-# this function returns the oldest item in the queue
+# This function returns the oldest item in the queue, or `undef` if the queue is empty.
 sub peek_item {
     my ($self, $subqueue_name) = @_;
 
@@ -570,17 +570,32 @@ sub peek_item {
 
     my $redis_handle = $self->redis_handle;
 
-    # take oldest item (and bail if we can't find anything)
-    my ($item_key) = $redis_handle->lrange($subqueue_redis_key,-1,-1);
-    $item_key or return undef;
+    # Take the oldest item (and bail out if we can't find anything):
+    my @item_key = $rh->lrange($subqueue_redis_key, -1, -1);
+    @item_key
+        or return undef; # The queue is empty.
 
-    my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+    my $item_key = $item_key[0];
+
+    my $payload = $rh->get("item-$item_key");
+    defined $payload
+        or die sprintf(
+            q{%s->peek_item() found item_key=%s but not its payload! This should never happen!!},
+            __PACKAGE__, "item-$item_key"
+        );
+
+    my @metadata = $rh->hgetall("meta-$item_key");
+    @metadata
+        or die sprintf(
+            q{%s->peek_item() found item_key=%s but not its metadata! This should never happen!!},
+            __PACKAGE__, "item-$item_key"
+        );
+
+    return Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
         item_key => $item_key,
-        payload  => $redis_handle->get("item-$item_key") || undef,
-        metadata => { $redis_handle->hgetall("meta-$item_key") },
+        payload  => $payload,
+        metadata => { @metadata }
     });
-
-    return $item;
 }
 
 ################################################################################

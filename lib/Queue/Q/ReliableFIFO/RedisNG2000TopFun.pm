@@ -124,20 +124,32 @@ sub new {
 ####################################################################################################
 ####################################################################################################
 
-sub enqueue_item {
-    my $self = shift;
+sub enqueue_items {
+    my ($self, $params) = @_;
 
-    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY') ? $_[0] : [ @_ ];
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->enqueue_items() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__
+        );
+
+    my $items = $params->{items} // [];
+    ref $items eq 'ARRAY'
+        or die sprintf(
+            q{%s->enqueue_items()'s "items" parameter has to be an array!},
+            __PACKAGE__
+        );
 
     @$items
         or die sprintf(
-            '%s->enqueue_item() expects at least one item to enqueue!',
+            '%s->enqueue_items() expects at least one item to enqueue!',
             __PACKAGE__
         );
 
     grep { ref $_ || not defined $_ } @$items
         and die sprintf(
-            '%s->enqueue_item(): All payloads must be strings!',
+            '%s->enqueue_items(): All payloads must be strings!',
             __PACKAGE__
         );
 
@@ -151,7 +163,7 @@ sub enqueue_item {
         # Create the payload item.
         $rh->setnx("item-$item_key" => $input_item)
             or die sprintf(
-                '%s->enqueue_item() failed to setnx() data for item_key=%s. This means the key ' .
+                '%s->enqueue_items() failed to setnx() data for item_key=%s. This means the key ' .
                 'already existed, which is highly improbable.',
                 __PACKAGE__, $item_key
             );
@@ -174,7 +186,7 @@ sub enqueue_item {
         # Enqueue the actual item.
         $rh->lpush($self->_unprocessed_queue, $item_key)
             or die sprintf(
-                '%s->enqueue_item() failed to lpush() item_key=%s onto the unprocessed queue (%s).',
+                '%s->enqueue_items() failed to lpush() item_key=%s onto the unprocessed queue (%s).',
                 __PACKAGE__, $item_key, $self->_unprocessed_queue
             );
 
@@ -288,7 +300,7 @@ sub _claim_item_internal {
             # This means that after we know how many items we have...
             my $llen = $rh->llen($unprocessed_queue);
             # ... we only take those. But the point is that, between these two comments (err, maybe
-            #   the code statements are more important) there might have been an enqueue_item(), so
+            #   the code statements are more important) there might have been an enqueue_items(), so
             #   that we are actually grabbing less than what the user asked for. But we are OK with
             #   that, since the new items are too fresh anyway (they might even be too hot for that
             #   user's tongue).

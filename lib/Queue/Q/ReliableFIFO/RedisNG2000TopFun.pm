@@ -364,21 +364,33 @@ sub claim_items_nonblocking {
 ####################################################################################################
 ####################################################################################################
 
-sub mark_item_as_processed {
-    my $self = shift;
+sub mark_items_as_processed {
+    my ($self, $params, $config) = @_;
 
-    my $items = ( @_ == 1 and ref $_[0] eq 'ARRAY' ) ? $_[0] : [ @_ ];
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, 'mark_items_as_processed'
+        );
+
+    my $items = $params->{items} // [];
+    ref $items eq 'ARRAY'
+        or die sprintf(
+            q{%s->()'s "items" parameter has to be an array!},
+            __PACKAGE__, 'mark_items_as_processed'
+        );
 
     @$items
         or die sprintf(
-            '%s->mark_item_as_processed() expects at least one item to mark as processed!',
-            __PACKAGE__
+            '%s->%s() expects at least one item to mark as processed!',
+            __PACKAGE__, 'mark_items_as_processed'
         );
 
-    grep { not $_->isa('Queue::Q::ReliableFIFO::ItemNG2000TopFun') } @{ $items }
+    grep { not $_->isa('Queue::Q::ReliableFIFO::ItemNG2000TopFun') } @$items
         and die sprintf(
-            '%s->mark_item_as_processed() only accepts objects of type %s or one of its subclasses.',
-            __PACKAGE__, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
+            '%s->%s() only accepts objects of type %s or one of its subclasses.',
+            __PACKAGE__, 'mark_items_as_processed', 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
         );
 
     my $rh = $self->redis_handle;
@@ -388,23 +400,18 @@ sub mark_item_as_processed {
         failed  => []
     );
 
-    # callback receives result of LREM call for removing item from the working
-    # queue and populates %result. if the LREM succeeds, we also need to clean
-    # up the payload+metadata.
-
+    # The callback receives the result of LREM() for removing the item from the working queue and
+    #   populates %result. If LREM() succeeds, we need to clean up the payload and the metadata.
     foreach my $item (@$items) {
         my $item_key = $item->{item_key};
-        my $lrem_direction = 1; # head-to-tail (http://redis.io/commands/lrem)
+        my $lrem_direction = 1; # Head-to-tail, though it should not make any difference... since
+                                #   the item is supposed to be unique anyway.
+                                # See http://redis.io/commands/lrem for details.
 
-        $rh->lrem(
-            $self->_working_queue,
-            $lrem_direction,
-            $item_key,
-            sub {
-                my $result_key = $_[0] ? 'flushed' : 'failed';
-                push @{ $result{$result_key} } => $item_key;
-            }
-        );
+        $rh->lrem($self->_working_queue, $lrem_direction, $item_key, sub {
+            my $result_key = $_[0] ? 'flushed' : 'failed';
+            push @{ $result{$result_key} }, $item_key;
+        });
     }
 
     $rh->wait_all_responses;
@@ -412,7 +419,6 @@ sub mark_item_as_processed {
     my ($flushed, $failed) = @result{qw/flushed failed/};
 
     my @to_purge = @$flushed;
-
     while (@to_purge) {
         my @chunk = map  {; ("meta-$_" => "item-$_") }
                     grep { defined $_ }
@@ -423,14 +429,14 @@ sub mark_item_as_processed {
         $rh->wait_all_responses();
         $deleted == @chunk
             or warn sprintf(
-                '%s->mark_item_as_processed() could not remove some item/meta keys!',
+                '%s->mark_items_as_processed() could not remove some item/meta keys!',
                 __PACKAGE__
             );
     }
 
     @$failed
         and warn sprintf(
-            '%s->mark_item_as_processed(): %d/%d items were not removed from the working queue (%s)!',
+            '%s->mark_items_as_processed(): %d/%d items were not removed from the working queue (%s)!',
             __PACKAGE__, int(@$failed), int(@$flushed + @$failed), $self->_working_queue
         );
 
@@ -918,7 +924,7 @@ sub handle_failed_items {
 # Legacy method names
 {
     no warnings 'once';
-    *mark_item_as_done   = \&mark_item_as_processed;
+    *mark_item_as_done   = \&mark_items_as_processed;
     *requeue_busy_item   = \&requeue_busy;
     *requeue_failed_item = \&requeue_failed_items;
     *memory_usage_perc   = \&percent_memory_used;

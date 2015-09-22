@@ -950,20 +950,20 @@ sub raw_items_failed {
 ####################################################################################################
 
 sub handle_expired_items {
-    my ($self, $timeout, $action) = @_;
+    my ($self, $params) = @_;
 
-    $timeout ||= $self->busy_expiry_time;
-
-    int($timeout)
+    my $timeout = $params->{timeout} // $self->busy_expiry_time;
+    $timeout =~ m/^\d+$/ && $timeout
         or die sprintf(
             q{%s->handle_expired_items(): "$timeout" must be a positive integer!},
             __PACKAGE__
         );
 
-    $action && ( $action eq 'requeue' || $action eq 'drop' )
+    my $action = $params->{action} // 'requeue';
+    $action eq 'requeue' || $action eq 'drop'
         or die sprintf(
             '%s->handle_expired_items(): Unknown action (%s)!',
-            __PACKAGE__, $action // 'undefined'
+            __PACKAGE__, $action
         );
 
     my $rh = $self->redis_handle;
@@ -974,7 +974,7 @@ sub handle_expired_items {
 
     foreach my $item_key (@item_keys) {
         $rh->hgetall("meta-$item_key" => sub {
-            $item_metadata{$item_key} = { @_ } if @_;
+            @_ and $item_metadata{$item_key} = { @_ }
         });
     }
 
@@ -984,8 +984,11 @@ sub handle_expired_items {
     my $window = $now - $timeout;
 
     my @expired_items;
+    my @candidates = grep {
+        exists $item_metadata{$_} && $item_metadata{$_}->{time_enqueued} < $window
+    } @item_keys;
 
-    for my $item_key (grep { exists $item_metadata{$_} && $item_metadata{$_}{time_enqueued} < $window } @item_keys) {
+    for my $item_key (@candidates) {
         my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new(
             item_key => $item_key,
             metadata => $item_metadata{$item_key}

@@ -854,8 +854,16 @@ sub flush_queue {
 ####################################################################################################
 
 sub queue_length {
-    my ($self, $subqueue_name) = @_;
+    my ($self, $params) = @_;
 
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, 'queue_length'
+        );
+
+    my $subqueue_name = $params->{subqueue_name} // 'unprocessed';
     my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
         or die sprintf(
             q{%s->queue_length() couldn't find subqueue_accessor for subqueue_name=%s.},

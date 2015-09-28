@@ -74,12 +74,14 @@ sub new {
             );
     }
 
-    foreach my $provided_param (keys %$params) {
-        $VALID_PARAMS{$provided_param}
-            or die sprintf(
+    for my $provided_param (keys %$params) {
+        unless ($VALID_PARAMS{$provided_param}) {
+            warn sprintf(
                 q{%s->new() encountered an unknown parameter "%s".},
                 __PACKAGE__, $provided_param
             );
+            delete $params{$provided_param};
+        }
     }
 
     my $self = bless({

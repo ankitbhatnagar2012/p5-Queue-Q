@@ -1119,6 +1119,13 @@ sub raw_items_failed {
 sub handle_expired_items {
     my ($self, $params) = @_;
 
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, 'handle_expired_items'
+        );
+
     my $timeout = $params->{timeout} // $self->busy_expiry_time;
     $timeout =~ m/^\d+$/ && $timeout
         or die sprintf(
@@ -1134,14 +1141,31 @@ sub handle_expired_items {
         );
 
     my $rh = $self->redis_handle;
+    my (%item_metadata, %item_payload);
 
+    # Either we call Redis to know the length of the working queue, and then call
+    #   $rh->lrange($self->_working_queue, -$working_queue_length, -1);
+    # which costs us two RPCs, or just reverse what you get from a single RPC...
     my @item_keys = $rh->lrange($self->_working_queue, 0, -1);
+    for my $item_key (@item_keys) {
+        $rh->get("item-$item_key" => sub {
+            defined $_[0]
+                or die sprintf(
+                    q{%s->%s() found item_key=%s but not its payload! This should never happen!!},
+                    __PACKAGE__, 'handle_expired_items', "item-$item_key"
+                );
 
-    my %item_metadata;
+            $item_payload{$item_key} = $_[0];
+        });
 
-    foreach my $item_key (@item_keys) {
         $rh->hgetall("meta-$item_key" => sub {
-            @_ and $item_metadata{$item_key} = { @_ }
+            @_
+                or die sprintf(
+                    q{%s->%s() found item_key=%s but not its metadata! This should never happen!!},
+                    __PACKAGE__, 'handle_expired_items', "meta-$item_key"
+                );
+
+            $item_metadata{$item_key} = { @{ $_[0] } }
         });
     }
 
@@ -1155,19 +1179,26 @@ sub handle_expired_items {
         exists $item_metadata{$_} && $item_metadata{$_}->{time_enqueued} < $window
     } @item_keys;
 
-    for my $item_key (@candidates) {
-        my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new(
+    # ... which is what I've chosen to do.
+    for my $item_key (reverse @candidates) {
+        my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
             item_key => $item_key,
+            payload  => $item_payload{$item_key},
             metadata => $item_metadata{$item_key}
-        );
+        });
 
-        my $n = $action eq 'requeue'           ?
-                    $self->requeue_busy($item) :
+        my $n = $action eq 'requeue'                            ?
+                    $self->requeue_busy({ items => [ $item ] }) :
                 $action eq 'drop'                                   ?
                     $rh->lrem($self->_working_queue, -1, $item_key) :
                     undef;
 
         $n and push @expired_items, $item;
+
+        if ($action eq 'drop') {
+            $rh->del("item-$item_key");
+            $rh->del("meta-$item_key");
+        }
     }
 
     return \@expired_items;

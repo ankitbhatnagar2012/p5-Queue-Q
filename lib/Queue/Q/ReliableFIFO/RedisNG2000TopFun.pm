@@ -66,7 +66,7 @@ sub new {
             __PACKAGE__
         );
 
-    foreach my $required_param (qw/server port queue_name/) {
+    for my $required_param (qw/server port queue_name/) {
         $params->{$required_param}
             or die sprintf(
                 q{%s->new(): Missing mandatory parameter "%s".},
@@ -99,7 +99,7 @@ sub new {
 
     # populate subqueue attributes with name of redis list
     # e.g. unprocessed -> _unprocessed_queue (accessor name) -> foo_unprocessed (redis list name)
-    foreach my $subqueue_name ( keys %VALID_SUBQUEUES ) {
+    for my $subqueue_name ( keys %VALID_SUBQUEUES ) {
         my $accessor_name = $VALID_SUBQUEUES{$subqueue_name};
         my $redis_list_name = sprintf('%s_%s', $params->{queue_name}, $subqueue_name);
         $self->{$accessor_name} = $redis_list_name;
@@ -156,7 +156,7 @@ sub enqueue_items {
     my $rh = $self->redis_handle;
     my @created;
 
-    foreach my $input_item (@$items) {
+    for my $input_item (@$items) {
         my $item_id  = $UUID->create_hex();
         my $item_key = sprintf('%s-%s', $self->queue_name, $item_id);
 
@@ -402,7 +402,7 @@ sub mark_items_as_processed {
 
     # The callback receives the result of LREM() for removing the item from the working queue and
     #   populates %result. If LREM() succeeds, we need to clean up the payload and the metadata.
-    foreach my $item (@$items) {
+    for my $item (@$items) {
         my $item_key = $item->{item_key};
         my $lrem_direction = 1; # Head-to-tail, though it should not make any difference... since
                                 #   the item is supposed to be unique anyway.
@@ -541,7 +541,7 @@ sub __requeue  {
     my $items_requeued = 0;
 
     eval {
-        foreach my $item (@$items) {
+        for my $item (@$items) {
             $items_requeued += $self->_lua->call(
                 requeue => 3,
                 # Requeue takes 3 keys: The source, ok-destination and fail-destination queues:
@@ -896,7 +896,7 @@ sub _raw_items {
     my @item_keys = $rh->lrange($subqueue_redis_key, -$n, -1);
 
     my %items;
-    foreach my $item_key (@item_keys) {
+    for my $item_key (@item_keys) {
         $rh->get("item-$item_key", sub {
             defined $_[0]
                 or die sprintf(
@@ -921,7 +921,7 @@ sub _raw_items {
     $rh->wait_all_responses;
 
     my @items;
-    foreach my $item_key (@item_keys) {
+    for my $item_key (@item_keys) {
         unshift @items, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
             item_key => $item_key,
             payload  => $items{$item_key}->{payload},

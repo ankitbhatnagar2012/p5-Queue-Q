@@ -211,23 +211,23 @@ use constant {
 };
 
 sub _claim_items_internal {
-    my ($self, $params, $config) = @_;
+    my ($self, $params, $internal) = @_;
 
     $params //= {};
     ref $params eq 'HASH'
         or die sprintf(
             q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
-            __PACKAGE__, $config->{caller}
+            __PACKAGE__, $internal->{caller}
         );
 
     my $n_items = $params->{number_of_items} // 1;
     $n_items =~ m/^\d+$/ && $n_items
         or die sprintf(
             q{%s->%s()'s "number_of_items" parameter has to be a positive integer!},
-            __PACKAGE__, $config->{caller}
+            __PACKAGE__, $internal->{caller}
         );
 
-    my $mode = $config->{blocking_mode};
+    my $mode = $internal->{blocking_mode};
 
     my $timeout           = $self->claim_wait_timeout;
     my $rh                = $self->redis_handle;
@@ -367,7 +367,7 @@ sub claim_items_nonblocking {
 ####################################################################################################
 
 sub mark_items_as_processed {
-    my ($self, $params, $config) = @_;
+    my ($self, $params) = @_;
 
     $params //= {};
     ref $params eq 'HASH'
@@ -505,40 +505,40 @@ sub requeue_failed_items {
 }
 
 sub __requeue  {
-    my ($self, $params, $config) = @_;
+    my ($self, $params, $internal) = @_;
 
     $params //= {};
     ref $params eq 'HASH'
         or die sprintf(
             q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
-            __PACKAGE__, $config->{caller}
+            __PACKAGE__, $internal->{caller}
         );
 
     my $items = $params->{items} // [];
     ref $items eq 'ARRAY'
         or die sprintf(
             q{%s->%s()'s "items" parameter has to be an array!},
-            __PACKAGE__, $config->{caller}
+            __PACKAGE__, $internal->{caller}
         );
 
     @$items
         or die sprintf(
             '%s->%s() expects at least one item!',
-            __PACKAGE__, $config->{caller}
+            __PACKAGE__, $internal->{caller}
         );
 
-    my $source_queue = $config->{source_queue}
+    my $source_queue = $internal->{source_queue}
         or die sprintf(q{%s->__requeue(): "source_queue" parameter is required.}, __PACKAGE__);
 
     grep { not $_->isa('Queue::Q::ReliableFIFO::ItemNG2000TopFun') } @$items
         and die sprintf(
             '%s->%s() only accepts objects of type %s or one of its subclasses.',
-            __PACKAGE__, $config->{caller}, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
+            __PACKAGE__, $internal->{caller}, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
         );
 
-    my $place = $config->{place};
-    my $error = $config->{error} // '';
-    my $increment_process_count = $config->{increment_process_count};
+    my $place                   = $internal->{place};
+    my $error                   = $params->{error} // '';
+    my $increment_process_count = $internal->{increment_process_count};
 
     my $items_requeued = 0;
 
@@ -884,17 +884,17 @@ sub percent_memory_used {
 ####################################################################################################
 
 sub _raw_items {
-    my ($self, $params, $config) = @_;
+    my ($self, $params, $internal) = @_;
 
     my $n = $params->{number_of_items} || 0;
     $n =~ m/^\d+$/
         or die sprintf(
             q{%s->%s(): "%s" must be a positive integer, or zero to signify all items.},
-            __PACKAGE__, $config->{caller}, 'number_of_items'
+            __PACKAGE__, $internal->{caller}, 'number_of_items'
         );
 
     my $rh = $self->redis_handle;
-    my $subqueue_redis_key = sprintf('%s_%s', $self->queue_name, $config->{queue});
+    my $subqueue_redis_key = sprintf('%s_%s', $self->queue_name, $internal->{queue});
     my @item_keys = $rh->lrange($subqueue_redis_key, -$n, -1);
 
     my %items;
@@ -903,7 +903,7 @@ sub _raw_items {
             defined $_[0]
                 or die sprintf(
                     q{%s->%s() found item_key=%s but not its key! This should never happen!!},
-                    __PACKAGE__, $config->{caller}, "item-$item_key"
+                    __PACKAGE__, $internal->{caller}, "item-$item_key"
                 );
 
             $items{$item_key}->{payload} = $_[0];
@@ -913,7 +913,7 @@ sub _raw_items {
             @_
                 or die sprintf(
                     q{%s->%s() found item_key=%s but not its metadata! This should never happen!!},
-                    __PACKAGE__, $config->{caller}, "item-$item_key"
+                    __PACKAGE__, $internal->{caller}, "item-$item_key"
                 );
 
             $items{$item_key}->{metadata} = { @{ $_[0] } };

@@ -592,7 +592,7 @@ sub handle_failed_items {
     my (%item_metadata, %item_payload, @failed_items);
     for my $item_key (@item_keys) {
         $rh->get("item-$item_key" => sub {
-            defined $_[0]   
+            defined $_[0]
                 or die sprintf(
                     q{%s->%s() found item_key=%s but not its payload! This should never happen!!},
                     __PACKAGE__, 'handle_failed_items', "item-$item_key"
@@ -882,7 +882,7 @@ sub queue_length {
 ####################################################################################################
 ####################################################################################################
 
-# This function returns the oldest item in the queue, or `undef` if the queue is empty.
+# This function returns the oldest/newest item in the queue, or `undef` if the queue is empty.
 sub peek_item {
     my ($self, $params) = @_;
 
@@ -893,7 +893,7 @@ sub peek_item {
             __PACKAGE__, 'peek_item'
         );
 
-    my $direction = lc($params->{direction} // 'f');
+    my $direction = $params->{direction} // 'f';
     $direction eq 'b' || $direction eq 'f'
         or die sprintf(
             q{%s->%s(): "direction" is either 'b' (back) or 'f' (front).},
@@ -929,8 +929,7 @@ sub peek_item {
             __PACKAGE__, "item-$item_key"
         );
 
-    my @metadata = $rh->hgetall("meta-$item_key");
-    @metadata
+    my @metadata = $rh->hgetall("meta-$item_key")
         or die sprintf(
             q{%s->peek_item() found item_key=%s but not its metadata! This should never happen!!},
             __PACKAGE__, "item-$item_key"
@@ -946,9 +945,17 @@ sub peek_item {
 ####################################################################################################
 ####################################################################################################
 
-sub get_item_age {
-    my ($self, $subqueue_name) = @_;
+sub get_items_age {
+    my ($self, $params) = @_;
 
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, 'get_item_age'
+        );
+
+    my $subqueue_name = $params->{subqueue_name} // 'unprocessed';
     my $subqueue_accessor_name = $VALID_SUBQUEUES{$subqueue_name}
         or die sprintf(
             q{%s->get_item_age() couldn't find subqueue_accessor for subqueue_name=%s.},
@@ -961,15 +968,61 @@ sub get_item_age {
             __PACKAGE__, $subqueue_name
         );
 
-    my $rh = $self->redis_handle;
+    my $items = $params->{items} // [];
+    ref $items eq 'ARRAY'
+        or die sprintf(
+            q{%s->get_items_age()'s "items" parameter has to be an array!},
+            __PACKAGE__
+        );
 
-    # Take the oldest item (and bail out if we can't find anything):
-    my @item_key = $rh->lrange($subqueue_redis_key, -1, -1);
-    @item_key
-        or return undef; # The queue is empty.
+    if (@$items) {
+        grep { not $_->isa('Queue::Q::ReliableFIFO::ItemNG2000TopFun') } @$items
+            and die sprintf(
+                '%s->get_items_age() only accepts objects of type %s or one of its subclasses.',
+                __PACKAGE__, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun'
+            );
 
-    my $time_created = $rh->hget("meta-$item_key[0]", 'time_created');
-    return defined $time_created ? Time::HiRes::time() - $time_created : 0;
+        my (@ages, $time_created);
+        my $rh = $self->redis_handle;
+        my $now = Time::HiRes::time();
+
+        for my $item (@$items) {
+            $time_created = $item->time_created
+                or die sprintf(
+                    '%s->get_items_age() found an item without a "time_created" stamp!',
+                    __PACKAGE__
+                );
+            push @ages, ($time_created ? $now - $time_created : 0);
+        }
+
+        return \@ages;
+    } else { # Return the age of the oldest ('b' for back) or the youngest ('f' for front) item.
+             # Return `undef` is the queue is empty.
+        my $direction = $params->{direction} // 'f';
+        $direction eq 'b' || $direction eq 'f'
+            or die sprintf(
+                q{%s->get_items_age(): "direction" is either 'b' (back) or 'f' (front).},
+                __PACKAGE__
+            );
+        $direction = $direction eq 'f' ? -1 : 0;
+
+        my $rh = $self->redis_handle;
+
+        # Take the relevant item (and bail out if we can't find anything):
+        my @item_key = $rh->lrange($subqueue_redis_key, $direction, $direction);
+        @item_key
+            or return undef; # The queue is empty.
+
+        my $item_key = $item_key[0];
+        my @metadata = $rh->hgetall("meta-$item_key")
+            or die sprintf(
+                q{%s->%s() found item_key=%s but not its metadata! This should never happen!!},
+                __PACKAGE__, 'get_items_age', "item-$item_key"
+            );
+
+        my $time_created = $rh->hget("meta-$item_key", 'time_created');
+        return defined $time_created ? Time::HiRes::time() - $time_created : 0;
+    }
 }
 
 ####################################################################################################

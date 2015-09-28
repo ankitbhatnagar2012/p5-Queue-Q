@@ -4,6 +4,7 @@ use Data::Dumper;
 use strict;
 use warnings;
 
+sub _key          { return $_[0]->{item_key} }
 sub data          { return $_[0]->{payload} }
 sub time_created  { return $_[0]->{metadata}{time_created}  }
 sub time_enqueued { return $_[0]->{metadata}{time_enqueued} }

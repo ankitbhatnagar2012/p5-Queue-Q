@@ -80,7 +80,7 @@ sub new {
                 q{%s->new() encountered an unknown parameter "%s".},
                 __PACKAGE__, $provided_param
             );
-            delete $params{$provided_param};
+            delete $params->{$provided_param};
         }
     }
 
@@ -568,24 +568,121 @@ sub __requeue  {
 ####################################################################################################
 ####################################################################################################
 
-sub process_failed_items {
-    my ($self, $max_count, $callback) = @_;
+sub handle_failed_items {
+    my ($self, $params) = @_;
 
-    defined $max_count && $max_count !~ m/^\d+$/
-        and die sprintf(
-            '%s->process_failed_items(): "$max_count" must be a positive integer!',
-            __PACKAGE__
-        );
-
-    ref $callback eq 'CODE'
+    $params //= {};
+    ref $params eq 'HASH'
         or die sprintf(
-            '%s->process_failed_items(): "$callback" must be a code reference!',
-            __PACKAGE__
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, 'handle_failed_items'
         );
 
-    my $temp_table = 'temp-failed-' . $UUID->create_hex(); # Include queue_name too?
+    my $action = $params->{action} // 'requeue';
+    $action eq 'requeue' || $action eq 'drop'
+        or die sprintf(
+            '%s->handle_failed_items(): Unknown action (%s)!',
+            __PACKAGE__, $action
+        );
+
     my $rh = $self->redis_handle;
 
+    my @item_keys = $rh->lrange($self->_failed_queue, 0, -1);
+
+    my (%item_metadata, %item_payload, @failed_items);
+    for my $item_key (@item_keys) {
+        $rh->get("item-$item_key" => sub {
+            defined $_[0]   
+                or die sprintf(
+                    q{%s->%s() found item_key=%s but not its payload! This should never happen!!},
+                    __PACKAGE__, 'handle_failed_items', "item-$item_key"
+                );
+
+            $item_payload{$item_key} = $_[0];
+        });
+
+        $rh->hgetall("meta-$item_key" => sub {
+            @_
+                or die sprintf(
+                    q{%s->%s() found item_key=%s but not its metadata! This should never happen!!},
+                    __PACKAGE__, 'handle_failed_items', "meta-$item_key"
+                );
+
+            $item_metadata{$item_key} = { @{ $_[0] } }
+        });
+    }
+    $rh->wait_all_responses;
+
+    # Queues (well, lists) in Redis are stored right-to-left.
+    for my $item_key (reverse @item_keys) {
+        my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+            item_key => $item_key,
+            payload  => $item_payload{$item_key},
+            metadata => $item_metadata{$item_key}
+        });
+
+        my $n = $action eq 'requeue' ?
+                    $self->__requeue(
+                        {
+                            items => [ $item ],
+                            error => $item_metadata{$item_key}->{last_error}
+                        },
+                        {
+                            caller                  => 'handle_failed_items',
+                            # Items in the failed queue already have process_count = 0.
+                            # This ensures we don't count another attempt:
+                            increment_process_count => 0,
+                            place                   => 0,
+                            source_queue            => $self->_failed_queue
+                        }
+                    ) :
+                $action eq 'drop'                                  ?
+                    $rh->lrem($self->_failed_queue, -1, $item_key) :
+                    undef;
+
+        $n and push @failed_items, $item;
+
+        if ($action eq 'drop') {
+            $rh->del("item-$item_key");
+            $rh->del("meta-$item_key");
+        }
+    }
+
+    return \@failed_items;
+}
+
+sub process_failed_items {
+    my ($self, $params) = @_;
+
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, 'process_failed_items'
+        );
+
+    my $max_count = $params->{max_count} // 0;
+    $max_count =~ m/^\d+$/ && $max_count
+        or die sprintf(
+            '%s->process_failed_items(): "max_count" parameter must be a positive integer!',
+            __PACKAGE__
+        );
+
+    my $callback = $params->{callback}
+        or die sprintf(
+            '%s->process_failed_items(): "callback" parameter must be provided!',
+            __PACKAGE__
+        );
+    ref $callback eq 'CODE'
+        or die sprintf(
+            '%s->process_failed_items(): "callback" parameter must be a code reference!',
+            __PACKAGE__
+        );
+
+    my $temp_table = 'temp-' . $self->_failed_queue . $UUID->create_hex;
+    my $rh = $self->redis_handle;
+
+    my $failed_items = $self->queue_length({ subqueue_name => 'failed' });
     $rh->renamenx($self->_failed_queue, $temp_table)
         or die sprintf(
             '%s->process_failed_items() failed to renamenx() the failed queue (%s). This means' .
@@ -593,122 +690,131 @@ sub process_failed_items {
             __PACKAGE__, $self->_failed_queue
         );
 
-    my $error_count;
-    my @item_keys = $rh->lrange($temp_table, 0, $max_count ? $max_count : -1 );
-    my $item_count = @item_keys;
+    my ($error_count, $i, $item_key, @done);
+    my $item_count = $max_count && $max_count < $failed_items ? $max_count : $failed_items;
+    my @item_keys  = $rh->lrange($temp_table, -$item_count, -1);
 
-    foreach my $item_key (@item_keys) {
+    my $fail = sub {
+        $error_count++;
+        $rh->lpush($temp_table, shift);
+    };
+    for ($i = 1; $i <= $item_count; $i++) {
+        $item_key = $rh->rpop($temp_table);
+
+        my $payload = $rh->get("item-$item_key");
+        defined $payload
+            or die sprintf(
+                q{%s->peek_item() found item_key=%s but not its payload! This should never happen!!},
+                __PACKAGE__, "item-$item_key"
+            );
+
+        my @metadata = $rh->hgetall("meta-$item_key")
+            or die sprintf(
+                q{%s->peek_item() found item_key=%s but not its metadata! This should never happen!!},
+                __PACKAGE__, "item-$item_key"
+            );
+
         eval {
-            my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+            my $response = $callback->(Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
                 item_key => $item_key,
-                payload  => $rh->get("item-$item_key") || undef,
-                metadata => { $rh->hgetall("meta-$item_key") }
-            });
+                payload  => $payload,
+                metadata => { @metadata }
+            }));
 
-            $callback->($item);
-        } or do {
-            $error_count++;
-        };
+            if ($response) { # true means success, so we should only declare those items done.
+                push @done, $item_key;
+            } else {
+                $fail->($item_key);
+            }
+        } or $fail->($item_key);
     }
 
-    if ($max_count) {
-        $rh->ltrim($temp_table, 0, $max_count );
-        # move overflow items back to failed queue
-        if ($item_count == $max_count) {
-            while ( $rh->rpoplpush($temp_table, $self->_failed_queue ) ) {}
-        }
+    # Do we have any overflow items?
+    if ($max_count and $failed_items > $max_count) {
+        $rh->ltrim($temp_table, 0, $failed_items - $max_count - 1);
+
+        # Move overflow items back to the failed queue.
+        while ( $rh->rpoplpush($temp_table, $self->_failed_queue) ) {}
     }
 
-    $rh->del($temp_table);
+    $rh->del($temp_table, sub {});
+    $rh->del("meta-$_", "item-$_", sub {})
+        for @done;
+
+    $rh->wait_all_responses;
 
     return ($item_count, $error_count);
 }
 
-sub handle_failed_items {
-    my ($self, $action) = @_;
-
-    $action && ( $action eq 'requeue' || $action eq 'return' )
-        or die sprintf(
-            '%s->handle_failed_items(): Unknown action (%s)!',
-            __PACKAGE__, $action // 'undefined'
-        );
-
-    my $rh = $self->redis_handle;
-
-    my @item_keys = $rh->lrange($self->_failed_queue, 0, -1);
-
-    my ( %item_metadata, @failed_items );
-
-    foreach my $item_key (@item_keys) {
-        $rh->hgetall("meta-$item_key" => sub {
-            $item_metadata{$item_key} = { @_ };
-        });
-    }
-
-    $rh->wait_all_responses;
-
-    for my $item_key (@item_keys) {
-        my $item = Queue::Q::ReliableFIFO::ItemNG2000TopFun->new(
-            item_key => $item_key,
-            metadata => $item_metadata{$item_key}
-        );
-
-        my $n;
-        if ( $action eq 'requeue' ) {
-            $n += $self->__requeue(
-                {
-                    error                   => $item_metadata{$item_key}{last_error},
-                    # Items in the failed queue already have process_count = 0.
-                    # This ensures we don't count another attempt:
-                    increment_process_count => 0,
-                    place                   => 0,
-                    source_queue            => $self->_failed_queue
-                },
-                $item
-            );
-        } elsif ( $action eq 'return' ) {
-            $n = $rh->lrem( $self->_failed_queue, -1, $item_key );
-        }
-
-        $n and push @failed_items, $item;
-    }
-
-    return \@failed_items;
-}
-
 sub remove_failed_items {
-    my ($self, %options) = @_;
+    my ($self, $params) = @_;
 
-    my $min_age  = delete $options{MinAge}       || 0;
-    my $min_fc   = delete $options{MinFailCount} || 0;
-    my $chunk    = delete $options{Chunk}        || 100;
-    my $loglimit = delete $options{LogLimit}     || 100;
-    cluck(__PACKAGE__ . qq{->remove_failed_items(): Invalid option "$_"!})
-        for keys %options;
+    $params //= {};
+    ref $params eq 'HASH'
+        or die sprintf(
+            q{%s->%s() accepts a single parameter (a hash reference) with all named parameters.},
+            __PACKAGE__, 'remove_failed_items'
+        );
+
+    my $min_age = delete($params->{min_age}) // 0;
+    $min_age =~ m/^\d+$/
+        or die sprintf(
+            q{%s->%s(): "%s" must be a non-negative integer.},
+            __PACKAGE__, 'remove_failed_items', 'min_age'
+        );
+
+    my $min_fc = delete($params->{min_fail_count}) // 0;
+    $min_fc =~ m/^\d+$/
+        or die sprintf(
+            q{%s->%s(): "%s" must be a non-negative integer.},
+            __PACKAGE__, 'remove_failed_items', 'min_fail_count'
+        );
+
+    my $chunk = delete($params->{chunk}) // 100;
+    $chunk =~ m/^\d+$/ && $chunk
+        or die sprintf(
+            q{%s->%s(): "%s" must be a positive integer.},
+            __PACKAGE__, 'remove_failed_items', 'chunk'
+        );
+
+    my $log_limit = delete($params->{log_limit}) // 100;
+    $log_limit =~ m/^\d+$/ && $log_limit
+        or die sprintf(
+            q{%s->%s(): "%s" must be a positive integer.},
+            __PACKAGE__, 'remove_failed_items', 'log_limit'
+        );
+
+    warn sprintf(
+        '%s->remove_failed_items(): Invalid options passed => "%s"',
+        __PACKAGE__, join('", "', keys %$params)
+    );
 
     my $now = Time::HiRes::time;
-    my $tc_min = $now - $min_age;
+    my $min_tc = $now - $min_age;
 
     my $rh = $self->redis_handle;
     my $failed_queue = $self->_failed_queue;
 
     my @items_removed;
 
-    my ($item_count, $error_count) = $self->process_failed_items($chunk, sub {
-        my $item = shift;
+    my ($item_count, $error_count) = $self->process_failed_items({
+        max_count => $chunk,
+        callback => sub {
+            my $item = shift;
 
-        my $metadata = $item->{metadata};
-        if ($metadata->{process_count} >= $min_fc || $metadata->{time_created} < $tc_min) {
-            my $item_key = $item->{item_key};
-            $rh->del("item-$item_key");
-            $rh->del("meta-$item_key");
-            @items_removed < $loglimit
-                and push @items_removed, $item;
-        } else {
-            $rh->lpush($failed_queue, $item->{item_key});
+            my $metadata = $item->{metadata};
+            if ($metadata->{process_count} >= $min_fc || $metadata->{time_created} < $min_tc) {
+                my $item_key = $item->{item_key};
+                $rh->del("item-$item_key");
+                $rh->del("meta-$item_key");
+                @items_removed < $log_limit
+                    and push @items_removed, $item;
+            } else {
+                $rh->lpush($failed_queue, $item->{item_key});
+            }
+
+            return 1; # Success!
         }
-
-        return 1; # Success!
     });
 
     $error_count

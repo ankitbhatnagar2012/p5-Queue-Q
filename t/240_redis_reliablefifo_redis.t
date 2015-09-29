@@ -5,7 +5,7 @@ use Test::More;
 
 use lib (-d 't' ? File::Spec->catdir(qw(t lib)) : 'lib' );
 use Queue::Q::Test;
-use Queue::Q::TestReliableFIFO;
+use Queue::Q::TestReliableFIFO::Redis;
 
 use Queue::Q::ReliableFIFO::Redis;
 
@@ -15,11 +15,11 @@ skip_no_redis() if not defined $Host;
 my $q = Queue::Q::ReliableFIFO::Redis->new(
     server => $Host,
     port => $Port,
-    queue_name => "test"
+    queue_name => "test_redis"
 );
 isa_ok($q, "Queue::Q::ReliableFIFO");
 isa_ok($q, "Queue::Q::ReliableFIFO::Redis");
 
-Queue::Q::TestReliableFIFO::test_claim_fifo($q);
+Queue::Q::TestReliableFIFO::Redis::test_claim_fifo($q);
 
 done_testing();

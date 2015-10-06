@@ -45,9 +45,18 @@ my $q = Queue::Q::ReliableFIFO::RedisNG2000TopFun->new({
 isa_ok($q, "Queue::Q::ReliableFIFO");
 isa_ok($q, "Queue::Q::ReliableFIFO::RedisNG2000TopFun");
 
-is($q->server, $host, 'Testing Class::XSAccessor getters.');
-is($q->port, $port, 'Testing Class::XSAccessor getters.');
-is($q->queue_name, $queue_name, 'Testing Class::XSAccessor getters.');
+my $q_another_instance = Queue::Q::ReliableFIFO::RedisNG2000TopFun->new({
+    server => $host,
+    port => $port,
+    queue_name => $queue_name,
+    busy_expiry_time => 1 # For testing expiration of items while being handled.
+});
+
+isnt($q, $q_another_instance, "Reinstantiating same queue objects should not be the same"); # comparing stringified instances only
+
+is( $q->server, $host,           'Testing Class::XSAccessor->server getter.'       );
+is( $q->port, $port,             'Testing Class::XSAccessor-port getter.'          );
+is( $q->queue_name, $queue_name, 'Testing Class::XSAccessor->queue_name getter.'   );
 
 my $requeue_limit = $q->requeue_limit;
 my $busy_expiry_time = $q->busy_expiry_time;
@@ -57,9 +66,9 @@ $q->set_requeue_limit($requeue_limit);
 $q->set_busy_expiry_time($busy_expiry_time);
 $q->set_claim_wait_timeout($claim_wait_timeout);
 
-is($q->requeue_limit, $requeue_limit, 'Testing Class::XSAccessor setters.');
-is($q->busy_expiry_time, $busy_expiry_time, 'Testing Class::XSAccessor setters.');
-is($q->claim_wait_timeout, $claim_wait_timeout, 'Testing Class::XSAccessor setters.');
+is( $q->requeue_limit,      $requeue_limit,         'Testing Class::XSAccessor->requeue_limit setter.'     );
+is( $q->busy_expiry_time,   $busy_expiry_time,      'Testing Class::XSAccessor->busy_expiry_time setter.'  );
+is( $q->claim_wait_timeout, $claim_wait_timeout,    'Testing Class::XSAccessor->claim_wait_timeout settes.');
 
 Queue::Q::TestReliableFIFO::RedisNG2000TopFun::test_reliable_fifo($q);
 

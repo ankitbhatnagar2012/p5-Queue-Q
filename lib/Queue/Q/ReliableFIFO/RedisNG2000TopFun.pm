@@ -786,8 +786,8 @@ sub remove_failed_items {
 
     warn sprintf(
         '%s->remove_failed_items(): Invalid options passed => "%s"',
-        __PACKAGE__, join('", "', keys %$params)
-    );
+        __PACKAGE__, join('", "', keys %{ $params })
+    ) if scalar keys %{ $params };
 
     my $now = Time::HiRes::time;
     my $min_tc = $now - $min_age;

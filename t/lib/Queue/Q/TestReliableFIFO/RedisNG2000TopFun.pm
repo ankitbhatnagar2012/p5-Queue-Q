@@ -69,7 +69,7 @@ sub test_reliable_fifo {
 
     for (keys %Queue::Q::ReliableFIFO::RedisNG2000TopFun::VALID_SUBQUEUES) {
         $items_in = "_${_}_queue";
-        is($q->$items_in, $q->queue_name . "_$_", 'Class::XSAccessor methods are working properly.');
+        is($q->$items_in, $q->queue_name . "_$_", "Class::XSAccessor->$_ methods are working properly.");
     }
 
     dies_ok { $q->enqueue_items(                      ) } 'You have to enqueue something!';
@@ -79,7 +79,7 @@ sub test_reliable_fifo {
     dies_ok { $q->enqueue_items({ items => [ undef ] }) } 'You can queue strings only. No undefs.';
     dies_ok { $q->enqueue_items({ items => [ []    ] }) } 'You can queue strings only. Nothing else.';
     dies_ok { $q->enqueue_items({ items => [ {}    ] }) } 'You can queue strings only. Nothing else.';
-
+    
     # Clean up so the tests can make sense...
     $q->flush_queue;
     $unprocessed = $in_progress = $failed = $processed = 0;
@@ -399,7 +399,17 @@ sub test_reliable_fifo {
     isa_ok($_, 'Queue::Q::ReliableFIFO::ItemNG2000TopFun')
         for @$expired_items;
 
-    # Testing Failures.
+    #
+    # Testing handle_failed_items
+    #
+    dies_ok {
+        $q->handle_failed_items([]);
+    } 'handle_failed_items() correctly dies if called with something other than a hash reference.';
+
+    dies_ok {
+        $q->handle_failed_items({ action => 'blah' });
+    } 'handle_failed_items() correctly dies if the "action" parameter is not valid.';
+
     $element1 = $q->enqueue_items({ items => [ 1 ] })->[0];
     $unprocessed++;
     report('After enqueuing an item', [ 1 ], []);
@@ -430,6 +440,25 @@ sub test_reliable_fifo {
     $items_in = $q->handle_failed_items({ action => 'drop' });
     $failed -= 3;
     report('After dropping all the failed items', [], [], []);
+
+    #
+    # Testing process_failed_items
+    #
+    dies_ok {
+        $q->process_failed_items([]);
+    } 'process_failed_items() correctly dies if called with something other than a hash reference.';
+    
+    dies_ok {
+        $q->process_failed_items({ max_count => 'blah' });
+    } 'process_failed_items() correctly dies if the "max_count" parameter is not a positive integer.';
+    
+    dies_ok {
+        $q->process_failed_items({ max_count => 1 });
+    } 'process_failed_items() correctly dies if the "callback" parameter is not provided';
+
+    dies_ok {
+        $q->process_failed_items({ callback => 'blah' });
+    } 'process_failed_items() correctly dies if the "callback" parameter is not a code reference.';
 
     $items_in = $q->enqueue_items({ items => [ 1, 2, 0, 4, 5, 6, 7, 8 ] });
     $unprocessed += 8;
@@ -474,7 +503,54 @@ sub test_reliable_fifo {
     $in_progress -= 2;
     report('After processing the remaining items in the working queue', [], []);
 
-    # Miscellaneous...
+    $q->process_failed_items({ max_count => 1234, callback => sub { push @failed, shift->data } });
+    $failed -= 3;
+    report('After process_failed_items()', [], [], []);
+    is_deeply(\@failed, [ 1, 2, 0, 4, 5, 6 ], 'process_failed_items() works in the correct order and behaves correctly if passed too many items to proceess.');
+
+    #
+    # Testing remove_failed_items
+    #
+    $q->flush_queue;
+
+    dies_ok {
+        $q->remove_failed_items([]);
+    } 'remove_failed_items() correctly dies if called with something other than a hash reference.';
+    
+    dies_ok {
+        $q->remove_failed_items({ min_age => 'blah' });
+    } 'remove_failed_items() correctly dies if the "min_age" parameter is not a non-negative integer.';
+    
+    dies_ok {
+        $q->remove_failed_items({ min_fail_count => 'blah' });
+    } 'remove_failed_items() correctly dies if the "min_fail_count" parameter is not a non-negative integer.';
+
+    dies_ok {
+        $q->remove_failed_items({ chunk => 'blah' });
+    } 'remove_failed_items() correctly dies if the "chunk" parameter is not a positive integer.';
+
+    dies_ok {
+        $q->remove_failed_items({ log_limit => 'blah' });
+    } 'remove_failed_items() correctly dies if the "log_limit" parameter is not a positive integer.';
+
+    $items_in = $q->enqueue_items({ items => [ 1, 2, 0, 4, 5, 6, 7, 8 ] });
+    $unprocessed += 8;
+    report('After enqueuing 8 items in one go', [ 1, 2, 0, 4, 5, 6, 7, 8 ], []);
+
+    $q->redis_handle->rpoplpush($q->_unprocessed_queue, $q->_failed_queue)
+        for 1 .. 2;
+    $unprocessed -= 2; $failed += 2;
+    report('After simulating failure for 2 items out of 8', [ 0, 4, 5, 6, 7, 8 ], [], [ 1, 2 ]);
+
+    # TODO : Explore all options being passed to remove_failed_items
+    my $item_count;
+    ( $item_count, @failed ) = $q->remove_failed_items();
+    $failed -= 2;
+    report('remove_failed_items seems to behave correctly', [ 0, 4, 5, 6, 7, 8 ], [], []);
+    
+    #
+    # Testing handle_expired_items
+    # 
     dies_ok {
         $q->handle_expired_items([]);
     } 'handle_expired_items() correctly dies if called with something other than a hash reference.';
@@ -485,23 +561,9 @@ sub test_reliable_fifo {
         $q->handle_expired_items({ action => 'blah' });
     } 'handle_expired_items() correctly dies if the "action" parameter is not valid.';
 
-    dies_ok {
-        $q->handle_failed_items([]);
-    } 'handle_failed_items() correctly dies if called with something other than a hash reference.';
-    dies_ok {
-        $q->handle_failed_items({ action => 'blah' });
-    } 'handle_failed_items() correctly dies if the "action" parameter is not valid.';
-
-    dies_ok {
-        $q->process_failed_items([]);
-    } 'process_failed_items() correctly dies if called with something other than a hash reference.';
-    dies_ok {
-        $q->process_failed_items({ max_count => 'blah' });
-    } 'process_failed_items() correctly dies if the "max_count" parameter is not a positive integer.';
-    dies_ok {
-        $q->process_failed_items({ callback => 'blah' });
-    } 'process_failed_items() correctly dies if the "callback" parameter is not a code reference.';
-
+    #
+    # Testing get_items_age
+    #
     dies_ok {
         $q->get_items_age([]);
     } 'get_items_age() correctly dies if called with something other than a hash reference.';
@@ -522,11 +584,6 @@ sub test_reliable_fifo {
         !defined $q->peek_item({ subqueue_name => 'working' }),
         'peek_item() returns undef whenever the requested queue is empty.'
     );
-
-    $q->process_failed_items({ max_count => 1234, callback => sub { push @failed, shift->data } });
-    $failed -= 3;
-    report('After process_failed_items()', [], [], []);
-    is_deeply(\@failed, [ 1, 2, 0, 4, 5, 6 ], 'process_failed_items() works in the correct order and behaves correctly if passed too many items to proceess.');
 
     # Remember the original value, to restore everything at the end...
     my (undef, $max_memory) = $q->redis_handle->config_get('maxmemory');

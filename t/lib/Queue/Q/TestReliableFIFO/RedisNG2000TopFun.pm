@@ -444,6 +444,8 @@ sub test_reliable_fifo {
     #
     # Testing process_failed_items
     #
+    $q->flush_queue;
+
     dies_ok {
         $q->process_failed_items([]);
     } 'process_failed_items() correctly dies if called with something other than a hash reference.';
@@ -470,10 +472,41 @@ sub test_reliable_fifo {
     report('After simulating failure for 6 items out of 8', [ 7, 8 ], [], [ 1, 2, 0, 4, 5, 6 ]);
 
     my @failed = ();
-    $q->process_failed_items({ max_count => 3, callback => sub { push @failed, shift->data } });
+    $q->process_failed_items({ 
+        max_count => 3, # lesser than the number of failed items
+        callback => sub { 
+            push @failed, shift->data; 
+        } 
+    });
     $failed -= 3;
     report('After process_failed_items()', [ 7, 8 ], [], [ 4, 5, 6 ]);
     is_deeply(\@failed, [ 1, 2, 0 ], 'process_failed_items() works in the correct order.');
+
+    @failed = ();
+    $q->process_failed_items({
+        max_count => 3, # same chunk as the number of failed items
+        callback => sub {
+            # do something with each failed item 
+            push @failed, shift->data;
+
+            # but explicitly fail the callback
+            return 0;
+        }
+    });
+    $failed -= 0;
+    report('After processing a chunk of items only in failed queue', [ 7, 8 ], [], [ 4, 5, 6 ]);
+    is_deeply(\@failed, [ 4, 5, 6 ], 'process_failed_items() works in the correct order and behaves correctly if processing a chunk of items only.');
+
+    @failed = ();
+    $q->process_failed_items({
+        max_count => 1234, # way more than the number of failed items 
+        callback => sub {
+            push @failed, shift->data; 
+        }
+    });
+    $failed -= 3;
+    report('After process_failed_items()', [ 7, 8 ], [], []);
+    is_deeply(\@failed, [ 4, 5, 6 ], 'process_failed_items() works in the correct order and behaves correctly if passed too many items to proceess.');
 
     # Testing successes.
     $element1 = $q->enqueue_items({ items => [ 1 ] })->[0];
@@ -502,11 +535,6 @@ sub test_reliable_fifo {
     $processed += 2;
     $in_progress -= 2;
     report('After processing the remaining items in the working queue', [], []);
-
-    $q->process_failed_items({ max_count => 1234, callback => sub { push @failed, shift->data } });
-    $failed -= 3;
-    report('After process_failed_items()', [], [], []);
-    is_deeply(\@failed, [ 1, 2, 0, 4, 5, 6 ], 'process_failed_items() works in the correct order and behaves correctly if passed too many items to proceess.');
 
     #
     # Testing remove_failed_items
@@ -542,8 +570,7 @@ sub test_reliable_fifo {
     $unprocessed -= 2; $failed += 2;
     report('After simulating failure for 2 items out of 8', [ 0, 4, 5, 6, 7, 8 ], [], [ 1, 2 ]);
 
-    my $item_count;
-    ( $item_count, @failed ) = $q->remove_failed_items();
+    my ( $item_count, $removed_items ) = $q->remove_failed_items();
     $failed -= 2;
     report('remove_failed_items seems to behave correctly', [ 0, 4, 5, 6, 7, 8 ], [], []);
 
@@ -552,13 +579,29 @@ sub test_reliable_fifo {
     $unprocessed -= 3; $failed += 3;
     report('After simulating failure for 3 items out of 8', [ 6, 7, 8 ], [], [ 0, 4, 5 ]);
 
-    ( $item_count, @failed ) = $q->remove_failed_items({
+    ( $item_count, $removed_items ) = $q->remove_failed_items({
         min_fail_count => 2,
         min_age => 3600,
     });
     $failed -= 0; # nothing should be deleted, no?
-    report('remove_failed_items seems to behave correctly', [ 6, 7, 8 ], [], [ 0, 4, 5 ]);
+    report('remove_failed_items seems to behave correctly with additional parameters', [ 6, 7, 8 ], [], [ 0, 4, 5 ]);
+    is_deeply($removed_items, [], 'remove_failed_items() works in the correct order and behaves correctly if passed too many items to proceess.');
 
+    ( $item_count, $removed_items ) = $q->remove_failed_items({
+        min_fail_count => 2,
+        min_age => 3600,
+        chunk => 2,
+    });
+    $failed -= 0; # nothing should be deleted, no?
+    report('remove_failed_items seems to behave correctly with processing chunks', [ 6, 7, 8 ], [], [ 0, 4, 5 ]);
+    is_deeply($removed_items, [], 'remove_failed_items() works in the correct order and behaves correctly if passed too many items to proceess.');
+
+    ( $item_count, $removed_items ) = $q->remove_failed_items({
+        chunk => 2,
+    });
+    $failed -= 2; # only the first two elements should be deleted
+    report('remove_failed_items seems to behave correctly with processing chunks', [ 6, 7, 8 ], [], [ 5 ]);
+    
     #
     # Testing handle_expired_items
     # 

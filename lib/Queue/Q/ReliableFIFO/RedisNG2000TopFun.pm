@@ -661,7 +661,7 @@ sub process_failed_items {
             __PACKAGE__, 'process_failed_items'
         );
 
-    my $max_count = $params->{max_count} // 0;
+    my $max_count = $params->{max_count} // 100;
     $max_count =~ m/^\d+$/ && $max_count
         or die sprintf(
             '%s->process_failed_items(): "max_count" parameter must be a positive integer!',
@@ -683,19 +683,18 @@ sub process_failed_items {
     my $rh = $self->redis_handle;
 
     my $failed_items = $self->queue_length({ subqueue_name => 'failed' });
-    $rh->renamenx($self->_failed_queue, $temp_table)
-        or die sprintf(
-            '%s->process_failed_items() failed to renamenx() the failed queue (%s). This means' .
-            ' that the key already existed, which is highly improbable.',
-            __PACKAGE__, $self->_failed_queue
-        );
-
+    
     my ($error_count, $i, $item_key, @done);
-    my $item_count = $max_count && $max_count < $failed_items ? $max_count : $failed_items;
-    my @item_keys  = $rh->lrange($temp_table, -$item_count, -1);
+    my $item_count = ( $max_count && $max_count <= $failed_items ) ? $max_count : $failed_items;
+    
+    MOVE_ITEMS_FROM_FAILED_QUEUE_TO_TEMP_TABLE : {
+        $rh->rpoplpush( $self->_failed_queue, $temp_table ) for ( 1 .. $item_count );
+    }
 
     my $fail = sub {
         $error_count++;
+        # this is where the requeueing of items is taken care of. The requeueing now becomes a
+        # responsibility of process_failed_items irrespective of what the callback does.
         $rh->lpush($temp_table, shift);
     };
     for ($i = 1; $i <= $item_count; $i++) {
@@ -707,7 +706,7 @@ sub process_failed_items {
                 q{%s->peek_item() found item_key=%s but not its payload! This should never happen!!},
                 __PACKAGE__, "item-$item_key"
             );
-
+        
         my @metadata = $rh->hgetall("meta-$item_key")
             or die sprintf(
                 q{%s->peek_item() found item_key=%s but not its metadata! This should never happen!!},
@@ -729,12 +728,15 @@ sub process_failed_items {
         } or $fail->($item_key);
     }
 
-    # Do we have any overflow items?
-    if ($max_count and $failed_items > $max_count) {
-        $rh->ltrim($temp_table, 0, $failed_items - $max_count - 1);
-
-        # Move overflow items back to the failed queue.
-        while ( $rh->rpoplpush($temp_table, $self->_failed_queue) ) {}
+    # Accounting for the chunk size, when the failed_queue has more
+    # items than what was requested.
+    #
+    # This also accounts for the order of the elements to be kept
+    # the same as it was before processing.
+    MOVE_BACK_ITEMS_FROM_TEMP_TABLE_TO_FAILED_QUEUE : {
+        while ( my $item_key = $rh->lpop( $temp_table ) ) {
+            $rh->rpush( $self->_failed_queue, $item_key );
+        }
     }
 
     $rh->del($temp_table, sub {});
@@ -795,7 +797,7 @@ sub remove_failed_items {
     my $rh = $self->redis_handle;
     my $failed_queue = $self->_failed_queue;
 
-    my @items_removed;
+    my @items_removed = ();
 
     my ($item_count, $error_count) = $self->process_failed_items({
         max_count => $chunk,
@@ -811,14 +813,13 @@ sub remove_failed_items {
                     and push @items_removed, $item;
                 # all good, should be marked deleted
                 return 1;
-            } else {
-                $rh->lpush($failed_queue, $item->{item_key});
-                # since the item was not supposed to be deleted,
-                # the callback should send failure since we dont
-                # want process failed items to delete the key
-                # references, because that'll be very very bad.
-                return 0;
-            }
+            } 
+            
+            # since the item was not supposed to be deleted,
+            # the callback should send failure since we dont
+            # want process failed items to delete the key
+            # references, because that'll be very very bad.
+            return 0;
         }
     });
 
@@ -1116,6 +1117,36 @@ sub raw_items_working {
 sub raw_items_failed {
     my ($self, $params) = @_;
     $self->_raw_items($params, { queue => 'failed', caller => 'raw_items_failed' });
+}
+
+sub raw_items_temp {
+    my ($self, $temp_table) = @_;
+    my $rh = $self->redis_handle;
+    my $subqueue_redis_key = $temp_table;
+    my @item_keys = $rh->lrange($subqueue_redis_key, 0, -1);
+
+    my %items;
+    for my $item_key (@item_keys) {
+        $rh->get("item-$item_key", sub {
+            $items{$item_key}->{payload} = $_[0];
+        });
+
+        $rh->hgetall("meta-$item_key", sub {
+            $items{$item_key}->{metadata} = { @{ $_[0] } };
+        });
+    }
+
+    $rh->wait_all_responses;
+
+    my @items;
+    for my $item_key (@item_keys) {
+        unshift @items, Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+            item_key => $item_key,
+            payload  => $items{$item_key}->{payload},
+            metadata => $items{$item_key}->{metadata}
+        });
+    }
+    return \@items;
 }
 
 ####################################################################################################

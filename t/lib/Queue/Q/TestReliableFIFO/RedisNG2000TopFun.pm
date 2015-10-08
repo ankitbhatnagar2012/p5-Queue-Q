@@ -542,12 +542,23 @@ sub test_reliable_fifo {
     $unprocessed -= 2; $failed += 2;
     report('After simulating failure for 2 items out of 8', [ 0, 4, 5, 6, 7, 8 ], [], [ 1, 2 ]);
 
-    # TODO : Explore all options being passed to remove_failed_items
     my $item_count;
     ( $item_count, @failed ) = $q->remove_failed_items();
     $failed -= 2;
     report('remove_failed_items seems to behave correctly', [ 0, 4, 5, 6, 7, 8 ], [], []);
-    
+
+    $q->redis_handle->rpoplpush($q->_unprocessed_queue, $q->_failed_queue)
+        for 1 .. 3;
+    $unprocessed -= 3; $failed += 3;
+    report('After simulating failure for 3 items out of 8', [ 6, 7, 8 ], [], [ 0, 4, 5 ]);
+
+    ( $item_count, @failed ) = $q->remove_failed_items({
+        min_fail_count => 2,
+        min_age => 3600,
+    });
+    $failed -= 0; # nothing should be deleted, no?
+    report('remove_failed_items seems to behave correctly', [ 6, 7, 8 ], [], [ 0, 4, 5 ]);
+
     #
     # Testing handle_expired_items
     # 

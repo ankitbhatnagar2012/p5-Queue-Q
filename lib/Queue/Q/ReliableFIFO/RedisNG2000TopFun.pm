@@ -809,11 +809,16 @@ sub remove_failed_items {
                 $rh->del("meta-$item_key");
                 @items_removed < $log_limit
                     and push @items_removed, $item;
+                # all good, should be marked deleted
+                return 1;
             } else {
                 $rh->lpush($failed_queue, $item->{item_key});
+                # since the item was not supposed to be deleted,
+                # the callback should send failure since we dont
+                # want process failed items to delete the key
+                # references, because that'll be very very bad.
+                return 0;
             }
-
-            return 1; # Success!
         }
     });
 

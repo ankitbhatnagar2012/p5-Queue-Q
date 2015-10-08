@@ -692,7 +692,8 @@ sub process_failed_items {
     }
 
     my $fail = sub {
-        $error_count++;
+        my ( undef, $REPORT_WARN ) = @_;
+        $error_count++ if $REPORT_WARN;
         # this is where the requeueing of items is taken care of. The requeueing now becomes a
         # responsibility of process_failed_items irrespective of what the callback does.
         $rh->lpush($temp_table, shift);
@@ -721,12 +722,15 @@ sub process_failed_items {
                 metadata => { @metadata }
             }));
             1;
-        } or $fail->($item_key);
+        } or $fail->($item_key, 1);
 
         if ($response) { # true means success, so we should only declare those items done.
             push @done, $item_key;
         } else {
-            $fail->($item_key);
+            # We should not throw a warning when the Consumer
+            # explicitly decides to return a false from the
+            # callback.
+            $fail->($item_key, 0);
         }
     }
 

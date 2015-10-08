@@ -713,19 +713,21 @@ sub process_failed_items {
                 __PACKAGE__, "item-$item_key"
             );
 
+        my $response;
         eval {
-            my $response = $callback->(Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
+            $response = $callback->(Queue::Q::ReliableFIFO::ItemNG2000TopFun->new({
                 item_key => $item_key,
                 payload  => $payload,
                 metadata => { @metadata }
             }));
-
-            if ($response) { # true means success, so we should only declare those items done.
-                push @done, $item_key;
-            } else {
-                $fail->($item_key);
-            }
+            1;
         } or $fail->($item_key);
+
+        if ($response) { # true means success, so we should only declare those items done.
+            push @done, $item_key;
+        } else {
+            $fail->($item_key);
+        }
     }
 
     # Accounting for the chunk size, when the failed_queue has more
